@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         Libby Audio Only
 // @namespace    http://tampermonkey.net/
-// @version      3
+// @version      4
 // @description  Download the MP3 parts of a borrowed Libby audiobook (plus metadata/ for bakeMetadata.py). No EPUB, no ZIP, no FFmpeg.
 // @author       LibbyRip
 // @license      MIT
-// @match        *://libbyapp.com/*
-// @match        *://*.libbyapp.com/*
-// @match        *://*.overdrive.com/*
+// @match        *://*.listen.libbyapp.com/*
+// @match        *://*.listen.overdrive.com/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
@@ -20,7 +19,7 @@
     // Log before anything else: if this line never appears, the script did not
     // run at all (usually a @match problem), which is otherwise indistinguishable
     // from "ran but the injection was blocked".
-    console.log("[lgrab] userscript running on " + location.href +
+    console.log("[lgrab] v4 userscript running on " + location.href +
         (window.top === window ? " (top frame)" : " (iframe)"));
 
     let injected = false;
@@ -47,8 +46,15 @@
 
             const script = document.createElement("script");
             script.textContent = code;
-            root.appendChild(script);
-            script.remove();
+            try {
+                root.appendChild(script);
+            } catch (e) {
+                // A syntax error in the injected text surfaces here as a
+                // DOMException; never let it take the page down.
+                console.error("[lgrab] could not inject into the page context:", e && e.message ? e.message : e);
+            } finally {
+                script.remove();
+            }
         };
 
         // A MutationObserver callback is a microtask, so it fires before the
