@@ -554,6 +554,7 @@
             if (state.running) ui.status.textContent = "starting…";
             else if (state.lastError) ui.status.textContent = state.lastError;
             else if (state.files.length) ui.status.textContent = `${state.files.length} file(s) saved`;
+            else if (summary) ui.status.textContent = summary;
             else ui.status.textContent = "";
         }
 
@@ -561,9 +562,11 @@
 
         // One line, once, without anyone typing into a console: whether the
         // captured tokens line up with the parts is the only thing that has to
-        // be known before clicking.
+        // be known before clicking. Kept in a variable as well as in the panel,
+        // because the panel may not exist yet when this runs.
         const startedAt = Date.now();
         let reported = false;
+        let summary = null;
 
         function autoReport() {
             if (reported) return;
@@ -581,12 +584,18 @@
             }
             const tokens = state.params ? state.params.length : 0;
             const line = `${tokens} tokens / ${list.length} components / ${parts.length} parts`;
-            if (tokens && tokens === list.length && parts.length === list.length) {
+            const aligned = tokens === list.length && parts.length === list.length;
+            if (aligned) {
                 log(`ready: ${line} — click Grab audio`);
             } else {
                 warn(`NOT READY: ${line} — do not start yet, the numbers should match`);
                 if (parts.length) validate(parts);
             }
+            // Same verdict on the panel, so nothing has to be read in a console.
+            summary = aligned
+                ? `${list.length} parts ready`
+                : `check: ${tokens}/${list.length} tokens`;
+            if (ui) updateUi();
         }
 
         setInterval(autoReport, 500);
