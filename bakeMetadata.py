@@ -129,7 +129,8 @@ def bake_metadata(workingDir, progress_callback=None):
             child_ids.append(cid)
             c = audiofile.tag.chapters.set(
                 cid,
-                (int(last["offset"]) * 1000, int(chap["offset"]) * 1000 - 1)
+                (round(float(last["offset"]) * 1000),
+                 round(float(chap["offset"]) * 1000) - 1)
             )
             c.title = last["title"]
             last = chap
@@ -137,7 +138,8 @@ def bake_metadata(workingDir, progress_callback=None):
         # Only write a table of contents when this part actually has chapters,
         # otherwise the child id b"last" would dangle.
         if last is not None:
-            start_ms = int(last["offset"]) * 1000
+            # Chapter offsets carry a fraction; int() used to cut it off.
+            start_ms = round(float(last["offset"]) * 1000)
             end_ms = start_ms + 1000
             if 0 <= spine_index < len(spines):
                 end_ms = int(spines[spine_index]["duration"] * 1000)

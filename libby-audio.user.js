@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Libby Audio Only
 // @namespace    http://tampermonkey.net/
-// @version      7
+// @version      8
 // @description  Download the MP3 parts of a borrowed Libby audiobook (plus metadata/ for bakeMetadata.py). No EPUB, no FFmpeg.
 // @author       LibbyRip
 // @license      MIT
@@ -19,7 +19,7 @@
     // Log before anything else: if this line never appears, the script did not
     // run at all (usually a @match problem), which is otherwise indistinguishable
     // from "ran but the injection was blocked".
-    console.log("[lgrab] v7 userscript running on " + location.href +
+    console.log("[lgrab] v8 userscript running on " + location.href +
         (window.top === window ? " (top frame)" : " (iframe)"));
 
     let injected = false;
@@ -276,10 +276,14 @@
             if (toc) {
                 metadata.chapters = toc.map(entry => {
                     const [path, offset] = String(entry.path).split("#");
+                    // The offset is seconds into that part, and it is not always a
+                    // whole number: `| 0` used to throw the fraction away, which
+                    // puts every chapter up to a second early once it is baked in.
+                    const seconds = parseFloat(offset);
                     return {
                         title: entry.title,
                         spine: spinePaths.indexOf(path),
-                        offset: 1 * (offset | 0),
+                        offset: Number.isFinite(seconds) ? seconds : 0,
                     };
                 });
             }

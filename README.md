@@ -77,6 +77,29 @@ Notes:
   are per-frame, so if the console says `__lg is not defined` you are in the wrong frame —
   switch the console's context dropdown from `top` to the player frame.
 
+## Converting to m4b or tagged mp3 (`audiobook.py`)
+
+`audiobook.py` turns the `.zip` the userscript downloads into the format you want. It needs
+FFmpeg on your PATH; the m4b path needs nothing else, the mp3 path also needs `eyeD3`.
+
+```bash
+python audiobook.py m4b "Author - Title.zip"    # one .m4b, chapters and cover embedded
+python audiobook.py mp3 "Author - Title.zip"    # unpacked, tagged Part 001.mp3 ...
+```
+
+- **m4b** joins the parts into one file, encodes AAC, and writes the chapter list from
+  `metadata/metadata.json` as real chapters, along with the cover, title, author, album and
+  narrator. This is the format audiobook players show a chapter menu for (Apple Books,
+  Prologue, Audiobookshelf, Smart Audiobook Player). Chapter frames inside separate MP3s are
+  read by very few players, which is what the m4b is for.
+- Chapter positions are computed from the **measured** duration of each part (`ffprobe`), not
+  from the manifest's numbers, and a chapter that runs across several parts is written once
+  instead of once per part.
+- The result is read back with `ffprobe` before it is reported as done, so a failed merge
+  cannot look like a successful one.
+- Both accept an already-unzipped folder instead of the zip, and `--out` to choose the
+  destination. Running the mp3 mode twice is fine: it reuses the folder it made.
+
 ## Using the Python Script (`bakeMetadata.py`)
 
 This repository includes a Python script that allows you to bake metadata into your downloaded audiobook MP3s, either via the command-line or a GUI.
