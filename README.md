@@ -23,6 +23,10 @@ Rip all your favorite audiobooks from libby!
 
 ## Audio-only variant (`libby-audio.user.js`)
 
+Based on [PsychedelicPalimpsest/LibbyRip](https://github.com/PsychedelicPalimpsest/LibbyRip)
+(MIT, © HeronErin): `userscript.js` and the rest of the project are upstream's, and
+`libby-audio.user.js` is the addition this variant is about.
+
 `libby-audio.user.js` is a much smaller alternative to the main userscript. It does one
 thing: download the MP3 parts of a borrowed audiobook, plus the `metadata/` folder that
 `bakeMetadata.py` and `buildChapters.py` already consume. No EPUB, no in-browser FFmpeg,
