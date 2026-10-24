@@ -178,6 +178,20 @@ def probe_duration(path: Path) -> float:
         return 0.0
 
 
+def probe_bitrate(path: Path) -> int | None:
+    "Bits per second of the first audio stream, or None."
+    result = subprocess.run(
+        ("ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=bit_rate", "-of", "default=noprint_wrappers=1:nokey=1", str(path)),
+        capture_output=True, text=True,
+    )
+    try:
+        value = int(result.stdout.strip())
+    except ValueError:
+        return None
+    return value or None
+
+
 def as_seconds(value) -> float:
     try:
         return float(value or 0)
@@ -258,11 +272,16 @@ def write_ffmetadata(path: Path, chapters: list[tuple[str, int, int]]) -> None:
 
 # ------------------------------------------------------------------------ m4b
 
-def make_m4b(book: Path, metadata: dict, out: Path) -> None:
+def make_m4b(book: Path, metadata: dict, out: Path, bitrate: int | None = None) -> None:
     parts = part_paths(book, len(metadata.get("spine") or []))
     durations = [probe_duration(part) for part in parts]
     if not any(durations):
         die("ffprobe could not read the duration of any part - are these really mp3 files?")
+
+    # Re-encoding at 128k would double the size of a 64k mono book for no audible
+    # gain, so follow the source unless told otherwise.
+    source_bitrate = next((rate for rate in (probe_bitrate(part) for part in parts) if rate), None)
+    rate = bitrate or min(source_bitrate or 64000, 128000)
 
     chapters, total = build_chapters(metadata, durations)
     if not chapters:
@@ -291,7 +310,7 @@ def make_m4b(book: Path, metadata: dict, out: Path) -> None:
         command = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-stats",
                    *inputs, "-filter_complex", graph,
                    "-map", "[aout]", "-map_chapters", str(chapter_index),
-                   "-c:a", "aac", "-b:a", "128k",
+                   "-c:a", "aac", "-b:a", f"{round(rate / 1000)}k",
                    "-metadata", f"title={book_title(metadata)}",
                    "-metadata", f"artist={book_author(metadata)}",
                    "-metadata", f"album={book_title(metadata)}",
@@ -310,7 +329,7 @@ def make_m4b(book: Path, metadata: dict, out: Path) -> None:
         command += ["-movflags", "+faststart", "-f", "ipod", str(out)]
 
         print(f"merging {len(parts)} part(s) into {len(chapters)} chapter(s), "
-              f"{formatted(total)} of audio ...")
+              f"{formatted(total)} of audio, {round(rate / 1000)}k AAC ...")
         result = subprocess.run(command)
         if result.returncode != 0:
             die(f"ffmpeg failed with exit code {result.returncode}")
@@ -395,6 +414,7 @@ def main() -> None:
     parser.add_argument("format", choices=("m4b", "mp3"), help="output format")
     parser.add_argument("input", help="the .zip the userscript downloaded, or a folder")
     parser.add_argument("--out", help="output file (m4b) or folder (mp3)")
+    parser.add_argument("--bitrate", type=int, help="m4b audio bitrate in kbps (default: follow the source)")
     args = parser.parse_args()
 
     source = Path(args.input).expanduser()
@@ -410,7 +430,7 @@ def main() -> None:
         metadata = load_metadata(book)
         default = f"{sanitize(book_author(metadata) + ' - ' + book_title(metadata))}.m4b"
         out = Path(args.out) if args.out else source.parent / default
-        make_m4b(book, metadata, out)
+        make_m4b(book, metadata, out, args.bitrate * 1000 if args.bitrate else None)
 
 
 if __name__ == "__main__":
