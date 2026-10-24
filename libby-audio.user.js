@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         Libby Audio Only
 // @namespace    http://tampermonkey.net/
-// @version      1
+// @version      2
 // @description  Download the MP3 parts of a borrowed Libby audiobook (plus metadata/ for bakeMetadata.py). No EPUB, no ZIP, no FFmpeg.
 // @author       LibbyRip
 // @license      MIT
-// @match        *://*.listen.libbyapp.com/*
-// @match        *://*.listen.overdrive.com/*
+// @match        *://libbyapp.com/*
+// @match        *://*.libbyapp.com/*
+// @match        *://*.overdrive.com/*
 // @run-at       document-start
 // @grant        none
-// @noframes
 // ==/UserScript==
 
 // Chrome/MV3 runs userscripts in an isolated JS world, so `window.BIF` and the
@@ -17,16 +17,56 @@
 // lives in `main`, which is stringified and injected once.
 
 (function () {
+    // Log before anything else: if this line never appears, the script did not
+    // run at all (usually a @match problem), which is otherwise indistinguishable
+    // from "ran but the injection was blocked".
+    console.log("[lgrab] userscript running on " + location.href);
+
+    let injected = false;
+    // DOM events cross the isolated/page world boundary, so the injected code
+    // reports back through one instead of touching `window`.
+    document.addEventListener("libregrab:ready", () => {
+        injected = true;
+        console.log("[lgrab] injected into the page context — run __lg.diagnose() in this console");
+    }, { once: true });
+
     function injectPageScript(fn) {
         const code = `(${fn.toString()})();`;
+        let done = false;
+        let observer = null;
+
         const run = () => {
+            if (done) return;
+            // At document-start <html> does not exist yet, and appending to
+            // `document` itself is not allowed.
+            const root = document.documentElement || document.head || document.body;
+            if (!root) return;
+            done = true;
+            if (observer) observer.disconnect();
+
             const script = document.createElement("script");
             script.textContent = code;
-            (document.documentElement || document.head || document.body).appendChild(script);
+            root.appendChild(script);
             script.remove();
         };
-        if (document.documentElement || document.head || document.body) run();
-        else document.addEventListener("readystatechange", run, { once: true });
+
+        // A MutationObserver callback is a microtask, so it fires before the
+        // next inline <script> in the page runs. Waiting for readystatechange
+        // instead would be far too late: every inline script would already have
+        // executed, and the JSON.parse hook would miss the part tokens.
+        observer = new MutationObserver(run);
+        observer.observe(document, { childList: true, subtree: true });
+        document.addEventListener("readystatechange", run, { once: true });
+        run();
+
+        setTimeout(() => {
+            if (injected) return;
+            console.error(
+                "[lgrab] the injected code never reported ready. Usual cause: this " +
+                "page's Content-Security-Policy blocked the inline <script>, so " +
+                "window.BIF and the JSON.parse hook were never installed."
+            );
+        }, 3000);
     }
 
     function main() {
@@ -270,10 +310,21 @@
             await writeFile(dir, "metadata.json", JSON.stringify(metadata, null, 2));
 
             if (metadata.coverUrl) {
+                const name = "cover." + coverExtension(metadata.coverUrl);
+                // Resuming must not re-download the cover on every run.
+                const existing = await dir.getFileHandle(name).catch(() => null);
+                if (existing) {
+                    const file = await existing.getFile().catch(() => null);
+                    if (file && file.size > 0) {
+                        log("cover already present, not re-downloading");
+                        log("wrote metadata/metadata.json");
+                        return;
+                    }
+                }
                 try {
                     const response = await fetch(metadata.coverUrl);
                     if (!response.ok) throw statusError(response.status);
-                    await writeFile(dir, "cover." + coverExtension(metadata.coverUrl), await response.blob());
+                    await writeFile(dir, name, await response.blob());
                 } catch (e) {
                     warn("cover download failed:", e.message || e);
                 }
@@ -500,6 +551,7 @@
             cancel: () => { state.cancelled = true; },
         };
         setInterval(mountUi, MOUNT_INTERVAL_MS);
+        document.dispatchEvent(new CustomEvent("libregrab:ready"));
         log("ready — run __lg.diagnose() before downloading");
     }
 

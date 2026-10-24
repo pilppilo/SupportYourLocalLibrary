@@ -45,6 +45,9 @@ Notes:
 - Debugging: open the console and run `__lg.diagnose()`. It reports how many signed part
   tokens were captured, the part count, the first/last part URL, and whether the book has a
   chapter table of contents.
+- The script logs `[lgrab] userscript running on <url>` as soon as it starts. If you do not
+  see that line on a book page, the script never ran at all — check the Tampermonkey icon
+  (a `0` there means the URL is not matched) before suspecting the script's code.
 
 ## Using the Python Script (`bakeMetadata.py`)
 
