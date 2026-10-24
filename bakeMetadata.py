@@ -7,7 +7,8 @@ import mimetypes
 import argparse
 import logging
 from eyed3.id3 import ID3_V2_4
-from PyQt5 import QtWidgets, QtCore
+
+# PyQt5 is imported lazily in gui_main() so that CLI mode does not require Qt.
 
 # Custom logging handler to forward logs to the GUI status window.
 class GuiLogHandler(logging.Handler):
@@ -50,12 +51,14 @@ def bake_metadata(workingDir, progress_callback=None):
         metadata = json.load(f)
 
     authorName = "Unknown"
-    for creator in metadata["creator"]:
-        if "author" in creator["role"]:
+    for creator in metadata.get("creator", []):
+        if "author" in creator.get("role", ""):
             authorName = creator["name"]
 
+    spines = metadata.get("spine") or []
+    # A book without a table of contents simply has no 'chapters' key.
     chapters = {}
-    for chap in metadata["chapters"]:
+    for chap in metadata.get("chapters", []):
         chapters.setdefault(chap["spine"], []).append(chap)
 
     # Collect all parts to process
@@ -66,6 +69,7 @@ def bake_metadata(workingDir, progress_callback=None):
         if progress_callback:
             progress_callback(error_msg, 0)
         raise FileNotFoundError(error_msg)
+    total_tracks = len(spines) or total
 
     for index, file in enumerate(parts):
         number = file[len("Part "):].split(".")[0]
@@ -85,7 +89,7 @@ def bake_metadata(workingDir, progress_callback=None):
         audiofile.tag.artist = authorName
         audiofile.tag.images.set(3, coverBytes, coverMime)
         audiofile.tag.album = metadata["title"]
-        audiofile.tag.track_num = (int(number), len(metadata["spine"]))
+        audiofile.tag.track_num = (int(number), total_tracks)
 
         # Get chapters for this spine index
         spine_chapters = chapters.get(spine_index, [])
@@ -117,7 +121,7 @@ def bake_metadata(workingDir, progress_callback=None):
         last = None
         child_ids = []
 
-        for i, chap in enumerate(chapters.get(int(number) - 1, [])):
+        for i, chap in enumerate(spine_chapters):
             if last is None:
                 last = chap
                 continue
@@ -130,22 +134,23 @@ def bake_metadata(workingDir, progress_callback=None):
             c.title = last["title"]
             last = chap
 
+        # Only write a table of contents when this part actually has chapters,
+        # otherwise the child id b"last" would dangle.
         if last is not None:
-            c = audiofile.tag.chapters.set(
-                b"last",
-                (
-                    int(last["offset"]) * 1000,
-                    int(metadata["spine"][chap["spine"]]["duration"] * 1000)
-                )
-            )
+            start_ms = int(last["offset"]) * 1000
+            end_ms = start_ms + 1000
+            if 0 <= spine_index < len(spines):
+                end_ms = int(spines[spine_index]["duration"] * 1000)
+
+            c = audiofile.tag.chapters.set(b"last", (start_ms, end_ms))
             c.title = last["title"]
 
-        audiofile.tag.table_of_contents.set(
-            b"toc",
-            toplevel=True,
-            child_ids=child_ids + [b"last"],
-            description="Table of Contents"
-        )
+            audiofile.tag.table_of_contents.set(
+                b"toc",
+                toplevel=True,
+                child_ids=child_ids + [b"last"],
+                description="Table of Contents"
+            )
 
         # als v2.4 speichern, damit UTF-8 Zeichen (Umlaute) korrekt sind
         audiofile.tag.save(version=ID3_V2_4)
@@ -155,118 +160,146 @@ def bake_metadata(workingDir, progress_callback=None):
             progress = int((index + 1) * 100 / total)
             progress_callback(f"Baked: {file}", progress)
 
-# Worker class to run bake_metadata in a separate thread
-class Worker(QtCore.QObject):
-    progress = QtCore.pyqtSignal(str, int)
-    finished = QtCore.pyqtSignal()
-    error = QtCore.pyqtSignal(str)
-
-    def __init__(self, path):
-        super().__init__()
-        self.path = path
-
-    def run(self):
-        try:
-            bake_metadata(self.path, progress_callback=self.progress.emit)
-        except Exception as e:
-            # Format for GUI if needed
-            if "\n" in str(e):
-                msg = str(e).replace("\n", "<br>")
-            else:
-                msg = str(e)
-            self.error.emit(msg)
-        finally:
-            self.finished.emit()
-
 # -------- GUI SECTION --------
 
-class MetadataBakerApp(QtWidgets.QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Bake Metadata")
-        self.resize(500, 300)
-        self.init_ui()
+def gui_main(directory=None):
+    """Run the PyQt5 GUI. Qt is imported here so CLI mode does not need PyQt5."""
+    from PyQt5 import QtCore, QtWidgets
 
-    def init_ui(self):
-        layout = QtWidgets.QVBoxLayout()
+    # Worker class to run bake_metadata in a separate thread
+    class Worker(QtCore.QObject):
+        progress = QtCore.pyqtSignal(str, int)
+        finished = QtCore.pyqtSignal()
+        error = QtCore.pyqtSignal(str)
 
-        # Directory selection
-        dir_layout = QtWidgets.QHBoxLayout()
-        self.dirInput = QtWidgets.QLineEdit()
-        self.browseBtn = QtWidgets.QPushButton("Browse")
-        dir_layout.addWidget(self.dirInput)
-        dir_layout.addWidget(self.browseBtn)
+        def __init__(self, path):
+            super().__init__()
+            self.path = path
 
-        # Run button
-        self.runBtn = QtWidgets.QPushButton("Run Bake")
+        def run(self):
+            try:
+                bake_metadata(self.path, progress_callback=self.progress.emit)
+            except Exception as e:
+                # Format for GUI if needed
+                if "\n" in str(e):
+                    msg = str(e).replace("\n", "<br>")
+                else:
+                    msg = str(e)
+                self.error.emit(msg)
+            finally:
+                self.finished.emit()
 
-        # Progress bar
-        self.progressBar = QtWidgets.QProgressBar()
-        self.progressBar.setRange(0, 100)
-        self.progressBar.setValue(0)
+    class MetadataBakerApp(QtWidgets.QWidget):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle("Bake Metadata")
+            self.resize(500, 300)
+            self.init_ui()
 
-        # Log output
-        self.logOutput = QtWidgets.QTextEdit()
-        self.logOutput.setReadOnly(True)
-        self.logOutput.setAcceptRichText(True)
+        def init_ui(self):
+            layout = QtWidgets.QVBoxLayout()
 
-        layout.addLayout(dir_layout)
-        layout.addWidget(self.runBtn)
-        layout.addWidget(self.progressBar)
-        layout.addWidget(self.logOutput)
-        self.setLayout(layout)
+            # Directory selection
+            dir_layout = QtWidgets.QHBoxLayout()
+            self.dirInput = QtWidgets.QLineEdit()
+            self.browseBtn = QtWidgets.QPushButton("Browse")
+            dir_layout.addWidget(self.dirInput)
+            dir_layout.addWidget(self.browseBtn)
 
-        self.browseBtn.clicked.connect(self.select_dir)
-        self.runBtn.clicked.connect(self.run_bake)
+            # Run button
+            self.runBtn = QtWidgets.QPushButton("Run Bake")
 
-    def select_dir(self):
-        dir_path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Audiobook Directory")
-        if dir_path:
-            self.dirInput.setText(dir_path)
+            # Progress bar
+            self.progressBar = QtWidgets.QProgressBar()
+            self.progressBar.setRange(0, 100)
+            self.progressBar.setValue(0)
 
-    def run_bake(self):
-        path = self.dirInput.text().strip()
-        self.logOutput.clear()
+            # Log output
+            self.logOutput = QtWidgets.QTextEdit()
+            self.logOutput.setReadOnly(True)
+            self.logOutput.setAcceptRichText(True)
 
-        if not os.path.isdir(path):
-            self.logOutput.append("<span style='color:red;'>Invalid directory path.</span>")
-            return
+            layout.addLayout(dir_layout)
+            layout.addWidget(self.runBtn)
+            layout.addWidget(self.progressBar)
+            layout.addWidget(self.logOutput)
+            self.setLayout(layout)
 
-        self.progressBar.setValue(0)
-        self.runBtn.setEnabled(False)
-        self.browseBtn.setEnabled(False)
+            self.browseBtn.clicked.connect(self.select_dir)
+            self.runBtn.clicked.connect(self.run_bake)
 
-        self.thread = QtCore.QThread()
-        self.worker = Worker(path)
-        self.worker.moveToThread(self.thread)
-        self.thread.started.connect(self.worker.run)
-        self.worker.progress.connect(self.update_status)
-        self.worker.error.connect(self.report_error)
-        self.worker.finished.connect(self.process_finished)
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
-        self.thread.start()
+        def select_dir(self):
+            dir_path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Audiobook Directory")
+            if dir_path:
+                self.dirInput.setText(dir_path)
 
-    def update_status(self, message, progress):
+        def run_bake(self):
+            path = self.dirInput.text().strip()
+            self.logOutput.clear()
+
+            if not os.path.isdir(path):
+                self.logOutput.append("<span style='color:red;'>Invalid directory path.</span>")
+                return
+
+            self.progressBar.setValue(0)
+            self.runBtn.setEnabled(False)
+            self.browseBtn.setEnabled(False)
+
+            self.thread = QtCore.QThread()
+            self.worker = Worker(path)
+            self.worker.moveToThread(self.thread)
+            self.thread.started.connect(self.worker.run)
+            self.worker.progress.connect(self.update_status)
+            self.worker.error.connect(self.report_error)
+            self.worker.finished.connect(self.process_finished)
+            self.worker.finished.connect(self.thread.quit)
+            self.worker.finished.connect(self.worker.deleteLater)
+            self.thread.finished.connect(self.thread.deleteLater)
+            self.thread.start()
+
+        def update_status(self, message, progress):
+            # Only display non-error messages here
+            if not message.startswith("ERROR"):
+                # Convert newlines to HTML line breaks for GUI
+                if "\n" in message:
+                    message = message.replace("\n", "<br>")
+                self.logOutput.append(message)
+            self.progressBar.setValue(progress)
+
+        def report_error(self, error_message):
+            # Ensure error messages are properly formatted for GUI
+            if "\n" in error_message:
+                error_message = error_message.replace("\n", "<br>")
+            self.logOutput.append(f"<span style='color:red;'>{error_message}</span>")
+
+        def process_finished(self):
+            self.logOutput.append("Processing complete.")
+            self.runBtn.setEnabled(True)
+            self.browseBtn.setEnabled(True)
+
+    app = QtWidgets.QApplication(sys.argv)
+    window = MetadataBakerApp()
+    if directory:
+        window.dirInput.setText(directory)
+
+    def gui_log_callback(message, progress=0):
         # Only display non-error messages here
         if not message.startswith("ERROR"):
-            # Convert newlines to HTML line breaks for GUI
-            if "\n" in message:
-                message = message.replace("\n", "<br>")
-            self.logOutput.append(message)
-        self.progressBar.setValue(progress)
+            QtCore.QMetaObject.invokeMethod(
+                window.logOutput,
+                "append",
+                QtCore.Qt.QueuedConnection,
+                QtCore.Q_ARG(str, message)
+            )
 
-    def report_error(self, error_message):
-        # Ensure error messages are properly formatted for GUI
-        if "\n" in error_message:
-            error_message = error_message.replace("\n", "<br>")
-        self.logOutput.append(f"<span style='color:red;'>{error_message}</span>")
+    gui_handler = GuiLogHandler(lambda msg: gui_log_callback(msg))
+    gui_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    gui_handler.setLevel(logging.WARNING)
+    eyed3.log.addHandler(gui_handler)
+    eyed3.log.propagate = False
 
-    def process_finished(self):
-        self.logOutput.append("Processing complete.")
-        self.runBtn.setEnabled(True)
-        self.browseBtn.setEnabled(True)
+    window.show()
+    sys.exit(app.exec_())
 
 # -------- MAIN ENTRY POINT --------
 
@@ -282,29 +315,7 @@ def main():
             print(f"{message} ({progress}%)")
 
     if args.gui:
-        app = QtWidgets.QApplication(sys.argv)
-        window = MetadataBakerApp()
-        if args.directory:
-            window.dirInput.setText(args.directory)
-
-        def gui_log_callback(message, progress=0):
-            # Only display non-error messages here
-            if not message.startswith("ERROR"):
-                QtCore.QMetaObject.invokeMethod(
-                    window.logOutput,
-                    "append",
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, message)
-                )
-
-        gui_handler = GuiLogHandler(lambda msg: gui_log_callback(msg))
-        gui_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
-        gui_handler.setLevel(logging.WARNING)
-        eyed3.log.addHandler(gui_handler)
-        eyed3.log.propagate = False
-
-        window.show()
-        sys.exit(app.exec_())
+        gui_main(args.directory)
     else:
         if args.directory:
             workingDir = args.directory

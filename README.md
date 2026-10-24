@@ -58,6 +58,8 @@ Python 3.x is required, along with the dependencies listed in `requirements.txt`
 pip install -r requirements.txt
 ```
 
+`PyQt5` is only needed for GUI mode (`--gui`). Command-line mode only requires `eyeD3`.
+
 ### Running The Script
 
 You can run the script in either **CLI mode** or **GUI mode**, depending on your needs:

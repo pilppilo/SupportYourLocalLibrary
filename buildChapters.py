@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import timedelta
 import json
@@ -32,6 +34,7 @@ class Metadata:
     chapters: List[Chapter]
     "A list of all the chapters in the audiobook"
 
+    @staticmethod
     def from_json(metadata: Any) -> 'Metadata':
         """Extracts a list of chapters from raw Libby metadata
 
@@ -41,9 +44,24 @@ class Metadata:
         spines = metadata[
             "spine"
         ]  # Array of objects with the properties duration, type, bitrate
-        chapters = metadata[
+        chapters = metadata.get(
             "chapters"
-        ]  # Array of objects with the properties title, spine, offset
+        )  # Array of objects with the properties title, spine, offset
+        if not chapters:
+            raise ValueError(
+                "metadata.json has no 'chapters' - this book has no table of contents"
+            )
+
+        # A spine index that is missing or out of range used to silently resolve
+        # to the last spine (Python's negative indexing), which put the chapter
+        # at the end of the book. Refuse instead.
+        for chapter in chapters:
+            spine = chapter.get("spine")
+            if not isinstance(spine, int) or not 0 <= spine < len(spines):
+                raise ValueError(
+                    f"chapter {chapter.get('title')!r} references spine {spine!r}, "
+                    f"but metadata['spine'] has {len(spines)} entries (0..{len(spines) - 1})"
+                )
 
         spine_offsets = [
             sum(spine["duration"] for spine in spines[:spine_index])
@@ -62,7 +80,8 @@ class Metadata:
 
         contributors = {
             creator["role"]: creator["name"]
-            for creator in metadata["creator"]
+            for creator in metadata.get("creator", [])
+            if creator.get("role")
         }
         
         author = contributors.get("author")
@@ -143,19 +162,32 @@ def metadata_to_ffmpeg(metadata: Metadata) -> str:
     return f";FFMETADATA1\n{title_line}{author_line}\n{chapters_part}"
 
 
+def configure_stdio():
+    "Windows defaults stdio to cp1252, which cannot encode most chapter titles."
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 if __name__ == "__main__":
+    configure_stdio()
+
     if len(sys.argv) == 1 or sys.argv[1] == "--chapters":
-        format = metadata_to_chapters_txt
+        formatter = metadata_to_chapters_txt
     elif sys.argv[1] == "--ffmpeg":
-        format = metadata_to_ffmpeg
+        formatter = metadata_to_ffmpeg
     else:
         print(
             f"Usage: {sys.argv[0]} [--chapters | --ffmpeg]"
             " < metadata.json > chapters.txt"
         )
-        exit(1)
+        sys.exit(1)
 
-    raw_metadata = json.load(sys.stdin)
-    metadata = Metadata.from_json(raw_metadata)
+    try:
+        raw_metadata = json.load(sys.stdin)
+        metadata = Metadata.from_json(raw_metadata)
+    except (ValueError, KeyError, json.JSONDecodeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(1)
 
-    print(format(metadata))
+    print(formatter(metadata))
