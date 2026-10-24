@@ -82,6 +82,38 @@ Notes:
 `audiobook.py` turns the `.zip` the userscript downloads into the format you want. It needs
 FFmpeg on your PATH; the m4b path needs nothing else, the mp3 path also needs `eyeD3`.
 
+### Start to finish (Windows)
+
+1. Press `Win` + `R`, type `powershell`, press Enter.
+2. Go to the folder you cloned this into:
+
+   ```bash
+   cd <the folder you cloned this into>
+   ```
+
+3. Run it on the zip the userscript downloaded, using the full path to that zip:
+
+   ```bash
+   python audiobook.py m4b "C:\Users\you\Downloads\Author - Title.zip"
+   ```
+
+4. Wait. It prints the merge as it goes; a 10 hour book takes roughly 13 minutes. Ignore the
+   scrolling numbers. It is finished when it prints the file it wrote:
+
+   ```text
+   wrote Author - Title.m4b: 9:43:23, 15 chapter(s), 278.5 MB
+   ```
+
+   That line is `ffprobe` reading the finished file back, so it only appears if the file is
+   actually good. If it does not appear, nothing usable was written.
+
+5. The `.m4b` is written **next to the zip** — in the example above,
+   `C:\Users\you\Downloads\Author - Title.m4b`. Double-click it, or copy it to a phone or into
+   Apple Books / Audiobookshelf / Smart Audiobook Player. The chapter menu is the book's real
+   table of contents.
+
+### The two formats
+
 ```bash
 python audiobook.py m4b "Author - Title.zip"    # one .m4b, chapters and cover embedded
 python audiobook.py mp3 "Author - Title.zip"    # unpacked, tagged Part 001.mp3 ...
@@ -97,8 +129,12 @@ python audiobook.py mp3 "Author - Title.zip"    # unpacked, tagged Part 001.mp3 
   instead of once per part.
 - The result is read back with `ffprobe` before it is reported as done, so a failed merge
   cannot look like a successful one.
-- Both accept an already-unzipped folder instead of the zip, and `--out` to choose the
-  destination. Running the mp3 mode twice is fine: it reuses the folder it made.
+- `--out` chooses the destination (`--out "D:\books\Proof.m4b"`), and both formats accept an
+  already-unzipped folder instead of the zip.
+- `--bitrate 96` overrides the encoder's bitrate. By default it follows the source, and a
+  Libby book is 64k, so re-encoding does not inflate the file.
+- The mp3 mode needs `eyeD3` first: `python -m pip install -r requirements.txt`. Running it
+  twice is fine: it reuses the folder it made.
 
 ## Using the Python Script (`bakeMetadata.py`)
 
