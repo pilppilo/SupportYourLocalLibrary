@@ -42,6 +42,11 @@ Notes:
   been open for a long time.
 - Browsers without the File System Access API (e.g. Firefox) fall back to one download prompt
   per part and skip the `metadata/` folder.
+- The player runs in a **cross-origin iframe** of the Libby app, and a cross-origin iframe is
+  not allowed to open a folder picker at all. On those pages the script falls back to normal
+  downloads: `Part 001.mp3 …`, plus `metadata.json` and `cover.jpg`. Put them in one folder
+  with `metadata.json` and `cover.jpg` inside a `metadata/` subfolder and `bakeMetadata.py`
+  works as usual.
 - Debugging: open the console and run `__lg.diagnose()`. It reports how many signed part
   tokens were captured, the part count, the first/last part URL, and whether the book has a
   chapter table of contents.

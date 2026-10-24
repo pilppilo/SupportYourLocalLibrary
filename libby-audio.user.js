@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Libby Audio Only
 // @namespace    http://tampermonkey.net/
-// @version      5
+// @version      6
 // @description  Download the MP3 parts of a borrowed Libby audiobook (plus metadata/ for bakeMetadata.py). No EPUB, no ZIP, no FFmpeg.
 // @author       LibbyRip
 // @license      MIT
@@ -19,7 +19,7 @@
     // Log before anything else: if this line never appears, the script did not
     // run at all (usually a @match problem), which is otherwise indistinguishable
     // from "ran but the injection was blocked".
-    console.log("[lgrab] v5 userscript running on " + location.href +
+    console.log("[lgrab] v6 userscript running on " + location.href +
         (window.top === window ? " (top frame)" : " (iframe)"));
 
     let injected = false;
@@ -303,13 +303,38 @@
                 state.dirHandle = null;
                 return;
             }
-            const parent = await window.showDirectoryPicker({ mode: "readwrite" });
+            let parent;
+            try {
+                parent = await window.showDirectoryPicker({ mode: "readwrite" });
+            } catch (e) {
+                if (e && e.name === "AbortError") throw e; // the user closed the picker
+                // The player runs in a cross-origin subframe of the app, and a
+                // cross-origin subframe is not allowed to show a file picker at
+                // all. Nothing inside the frame can change that, so fall back to
+                // one download per file instead of failing the whole run.
+                state.dirHandle = null;
+                warn("folder picker unavailable (" + (e && e.message ? e.message : e) +
+                    ") — falling back to one download per file");
+                return;
+            }
             const book = await parent.getDirectoryHandle(
                 sanitize(getAuthorString() + " - " + getTitle()),
                 { create: true }
             );
             await book.getDirectoryHandle("metadata", { create: true });
             state.dirHandle = book;
+        }
+
+        // Fallback path: a plain download, no File System Access API involved.
+        function saveViaDownload(name, blob) {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = name;
+            (document.body || document.documentElement).appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
         }
 
         async function writeFile(dir, name, data) {
@@ -333,9 +358,27 @@
         }
 
         async function exportMetadata() {
-            if (!state.dirHandle) return; // fallback mode: no extra download prompts
             const metadata = getMetadata();
             if (!metadata) return;
+
+            // Fallback mode: no directory to write into, so the metadata is a
+            // download like everything else. Skipping it would leave the parts
+            // with no chapters/tags for bakeMetadata.py.
+            if (!state.dirHandle) {
+                saveViaDownload("metadata.json", new Blob(
+                    [JSON.stringify(metadata, null, 2)], { type: "application/json" }));
+                if (metadata.coverUrl) {
+                    try {
+                        const response = await fetch(metadata.coverUrl);
+                        if (!response.ok) throw statusError(response.status);
+                        saveViaDownload("cover." + coverExtension(metadata.coverUrl), await response.blob());
+                    } catch (e) {
+                        warn("cover download failed:", e.message || e);
+                    }
+                }
+                log("downloaded metadata.json");
+                return;
+            }
 
             const dir = await state.dirHandle.getDirectoryHandle("metadata", { create: true });
             await writeFile(dir, "metadata.json", JSON.stringify(metadata, null, 2));
@@ -384,14 +427,7 @@
             if (!state.dirHandle) {
                 // Fallback: one download prompt per part.
                 const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement("a");
-                link.href = url;
-                link.download = part.name;
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
-                setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
+                saveViaDownload(part.name, blob);
                 state.files.push({ name: part.name, size: blob.size, handle: null });
                 return true;
             }
@@ -553,7 +589,11 @@
 
             if (state.running) ui.status.textContent = "starting…";
             else if (state.lastError) ui.status.textContent = state.lastError;
-            else if (state.files.length) ui.status.textContent = `${state.files.length} file(s) saved`;
+            else if (state.files.length) {
+                ui.status.textContent = state.dirHandle
+                    ? `${state.files.length} file(s) saved`
+                    : `${state.files.length} file(s) downloaded`;
+            }
             else if (summary) ui.status.textContent = summary;
             else ui.status.textContent = "";
         }
