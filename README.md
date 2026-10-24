@@ -29,7 +29,7 @@ thing: download the MP3 parts of a borrowed audiobook, plus the `metadata/` fold
 FFmpeg, no 50 MB download.
 
 1. Install it in Tampermonkey the same way as the main script (both can be installed at once).
-2. Open a borrowed audiobook. A **Grab audio** button appears in the top bar.
+2. Open a borrowed audiobook. A small **Grab audio** panel appears in the bottom-right corner.
 3. Click it and pick a parent folder. Files are written to
    `<parent>/<Author> - <Title>/Part 001.mp3 …` plus `metadata/`.
 
@@ -48,6 +48,13 @@ Notes:
 - The script logs `[lgrab] userscript running on <url>` as soon as it starts. If you do not
   see that line on a book page, the script never ran at all — check the Tampermonkey icon
   (a `0` there means the URL is not matched) before suspecting the script's code.
+- It also reports on its own once the book is loaded, e.g.
+  `[lgrab] ready: 15 tokens / 15 components / 15 parts — click Grab audio`. If those three
+  numbers differ, the run is refused instead of writing mis-numbered files.
+- The panel floats in its own fixed container, so it does not depend on the player's layout.
+  In a page with frames the panel is in the frame that holds the book; `__lg` (and the panel)
+  are per-frame, so if the console says `__lg is not defined` you are in the wrong frame —
+  switch the console's context dropdown from `top` to the player frame.
 
 ## Using the Python Script (`bakeMetadata.py`)
 

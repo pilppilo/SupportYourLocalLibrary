@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Libby Audio Only
 // @namespace    http://tampermonkey.net/
-// @version      4
+// @version      5
 // @description  Download the MP3 parts of a borrowed Libby audiobook (plus metadata/ for bakeMetadata.py). No EPUB, no ZIP, no FFmpeg.
 // @author       LibbyRip
 // @license      MIT
@@ -19,7 +19,7 @@
     // Log before anything else: if this line never appears, the script did not
     // run at all (usually a @match problem), which is otherwise indistinguishable
     // from "ran but the injection was blocked".
-    console.log("[lgrab] v4 userscript running on " + location.href +
+    console.log("[lgrab] v5 userscript running on " + location.href +
         (window.top === window ? " (top frame)" : " (iframe)"));
 
     let injected = false;
@@ -493,30 +493,51 @@
 
         let ui = null;
 
-        function mountUi() {
-            if (document.getElementById("lgrab")) return;
-            const bar = document.querySelector(".nav-progress-bar");
-            if (!bar) return;
-
-            const wrap = document.createElement("span");
+        // A fixed, self-contained panel. The app's own bars are where this used
+        // to be inserted, and its layout has changed enough that the button
+        // ended up clipped off the left edge. Nothing about the app's DOM is
+        // needed now, so a redesign cannot hide it.
+        function createUi() {
+            const wrap = document.createElement("div");
             wrap.id = "lgrab";
-            wrap.style.cssText = "display:inline-flex;align-items:center;gap:.5em;margin:0 .5em";
+            wrap.style.cssText = [
+                "position:fixed", "right:16px", "bottom:16px", "z-index:2147483647",
+                "display:flex", "align-items:center", "gap:8px",
+                "padding:8px 10px", "border-radius:10px",
+                "background:rgba(18,18,22,.9)", "color:#fff",
+                "font:13px/1.3 system-ui,-apple-system,Segoe UI,sans-serif",
+                "box-shadow:0 2px 12px rgba(0,0,0,.45)",
+            ].join(";");
 
             const button = document.createElement("button");
             button.id = "lgrabBtn";
             button.textContent = "Grab audio";
-            button.style.cssText = "padding:.25em .75em;cursor:pointer";
+            button.style.cssText = [
+                "padding:6px 12px", "cursor:pointer", "border:0", "border-radius:7px",
+                "background:#fff", "color:#111", "font:inherit", "font-weight:600",
+            ].join(";");
 
             const status = document.createElement("span");
             status.id = "lgrabStatus";
-            status.style.cssText = "font-size:.85em;opacity:.85";
+            status.style.cssText = "max-width:260px;opacity:.85;word-break:break-word";
 
             button.onclick = () => downloadAll().catch(e => warn(e));
             wrap.append(button, status);
-            bar.prepend(wrap);
+            return { wrap, button, status };
+        }
 
-            ui = { button, status };
-            updateUi();
+        function mountUi() {
+            // In a page with frames, only the frame holding the book mounts a
+            // panel, otherwise a nested player would show two of them.
+            if (window.top !== window && !components()) return;
+
+            if (!ui) ui = createUi();
+            if (!ui.wrap.isConnected) {
+                const parent = document.body || document.documentElement;
+                if (!parent) return;
+                parent.appendChild(ui.wrap);
+                updateUi();
+            }
         }
 
         function setProgress(done, total, name) {
@@ -535,6 +556,40 @@
             else if (state.files.length) ui.status.textContent = `${state.files.length} file(s) saved`;
             else ui.status.textContent = "";
         }
+
+        // ------------------------------------------------------ auto report
+
+        // One line, once, without anyone typing into a console: whether the
+        // captured tokens line up with the parts is the only thing that has to
+        // be known before clicking.
+        const startedAt = Date.now();
+        let reported = false;
+
+        function autoReport() {
+            if (reported) return;
+            const list = components();
+            if (!list) return;
+            captureParamsFromBif();
+            if (!state.params && Date.now() - startedAt < 15000) return; // give the hook a moment
+            reported = true;
+
+            let parts = [];
+            try {
+                parts = readParts();
+            } catch (e) {
+                warn(e.message);
+            }
+            const tokens = state.params ? state.params.length : 0;
+            const line = `${tokens} tokens / ${list.length} components / ${parts.length} parts`;
+            if (tokens && tokens === list.length && parts.length === list.length) {
+                log(`ready: ${line} — click Grab audio`);
+            } else {
+                warn(`NOT READY: ${line} — do not start yet, the numbers should match`);
+                if (parts.length) validate(parts);
+            }
+        }
+
+        setInterval(autoReport, 500);
 
         // ---------------------------------------------------------- diagnostics
 
