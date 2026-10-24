@@ -21,6 +21,31 @@ Rip all your favorite audiobooks from libby!
 <a href='https://ko-fi.com/V7V81BFLAH' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
 
 
+## Audio-only variant (`libby-audio.user.js`)
+
+`libby-audio.user.js` is a much smaller alternative to the main userscript. It does one
+thing: download the MP3 parts of a borrowed audiobook, plus the `metadata/` folder that
+`bakeMetadata.py` and `buildChapters.py` already consume. No EPUB, no ZIP, no in-browser
+FFmpeg, no 50 MB download.
+
+1. Install it in Tampermonkey the same way as the main script (both can be installed at once).
+2. Open a borrowed audiobook. A **Grab audio** button appears in the top bar.
+3. Click it and pick a parent folder. Files are written to
+   `<parent>/<Author> - <Title>/Part 001.mp3 …` plus `metadata/`.
+
+Notes:
+
+- Parts are downloaded one at a time, ~1.5 s apart. Parts that are already in the folder are
+  skipped, so clicking again resumes instead of starting over.
+- A `403`/`429` stops the run with a message in the status line instead of saving an error
+  page as an `.mp3`. Signed part URLs expire, so reload the page and click again if a tab has
+  been open for a long time.
+- Browsers without the File System Access API (e.g. Firefox) fall back to one download prompt
+  per part and skip the `metadata/` folder.
+- Debugging: open the console and run `__lg.diagnose()`. It reports how many signed part
+  tokens were captured, the part count, the first/last part URL, and whether the book has a
+  chapter table of contents.
+
 ## Using the Python Script (`bakeMetadata.py`)
 
 This repository includes a Python script that allows you to bake metadata into your downloaded audiobook MP3s, either via the command-line or a GUI.
