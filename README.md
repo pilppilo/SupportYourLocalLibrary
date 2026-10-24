@@ -25,13 +25,14 @@ Rip all your favorite audiobooks from libby!
 
 `libby-audio.user.js` is a much smaller alternative to the main userscript. It does one
 thing: download the MP3 parts of a borrowed audiobook, plus the `metadata/` folder that
-`bakeMetadata.py` and `buildChapters.py` already consume. No EPUB, no ZIP, no in-browser
-FFmpeg, no 50 MB download.
+`bakeMetadata.py` and `buildChapters.py` already consume. No EPUB, no in-browser FFmpeg,
+no 50 MB download.
 
 1. Install it in Tampermonkey the same way as the main script (both can be installed at once).
 2. Open a borrowed audiobook. A small **Grab audio** panel appears in the bottom-right corner.
-3. Click it and pick a parent folder. Files are written to
-   `<parent>/<Author> - <Title>/Part 001.mp3 …` plus `metadata/`.
+3. Click it. If the page can open a folder picker, pick a parent folder and files are written
+   to `<parent>/<Author> - <Title>/Part 001.mp3 …` plus `metadata/`. Otherwise (see below)
+   you get a single `<Author> - <Title>.zip` instead.
 
 Notes:
 
@@ -40,13 +41,24 @@ Notes:
 - A `403`/`429` stops the run with a message in the status line instead of saving an error
   page as an `.mp3`. Signed part URLs expire, so reload the page and click again if a tab has
   been open for a long time.
-- Browsers without the File System Access API (e.g. Firefox) fall back to one download prompt
-  per part and skip the `metadata/` folder.
 - The player runs in a **cross-origin iframe** of the Libby app, and a cross-origin iframe is
-  not allowed to open a folder picker at all. On those pages the script falls back to normal
-  downloads: `Part 001.mp3 …`, plus `metadata.json` and `cover.jpg`. Put them in one folder
-  with `metadata.json` and `cover.jpg` inside a `metadata/` subfolder and `bakeMetadata.py`
-  works as usual.
+  not allowed to open a folder picker at all (`SecurityError: … Cross origin sub frames aren't
+  allowed to show a file picker`). On those pages, and in browsers without the File System
+  Access API (e.g. Firefox), the script builds one **store-only ZIP** instead — a single
+  download named `<Author> - <Title>.zip` that unpacks into exactly the layout the folder path
+  writes:
+
+  ```
+  <Author> - <Title>/
+    Part 001.mp3 …
+    metadata/
+      metadata.json
+      cover.jpg
+  ```
+
+  Set Chrome to *Ask where to save each file* (`chrome://settings/downloads`) and that one
+  download asks you for a folder. ZIP64 is not implemented, so a book over 4 GiB is
+  downloaded as separate files with a message saying why.
 - Debugging: open the console and run `__lg.diagnose()`. It reports how many signed part
   tokens were captured, the part count, the first/last part URL, and whether the book has a
   chapter table of contents.

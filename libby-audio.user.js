@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Libby Audio Only
 // @namespace    http://tampermonkey.net/
-// @version      6
-// @description  Download the MP3 parts of a borrowed Libby audiobook (plus metadata/ for bakeMetadata.py). No EPUB, no ZIP, no FFmpeg.
+// @version      7
+// @description  Download the MP3 parts of a borrowed Libby audiobook (plus metadata/ for bakeMetadata.py). No EPUB, no FFmpeg.
 // @author       LibbyRip
 // @license      MIT
 // @match        *://*.listen.libbyapp.com/*
@@ -19,7 +19,7 @@
     // Log before anything else: if this line never appears, the script did not
     // run at all (usually a @match problem), which is otherwise indistinguishable
     // from "ran but the injection was blocked".
-    console.log("[lgrab] v6 userscript running on " + location.href +
+    console.log("[lgrab] v7 userscript running on " + location.href +
         (window.top === window ? " (top frame)" : " (iframe)"));
 
     let injected = false;
@@ -95,10 +95,16 @@
         const MOUNT_INTERVAL_MS = 500;
         const HALT_STATUSES = [403, 429];
 
+        // A ZIP entry cannot describe a file of 4 GiB or more without ZIP64
+        // records, so a book that big is downloaded as separate files instead.
+        // In an object so the guard can be exercised without a 4 GiB book.
+        const limits = { zipMaxTotal: 0xffffffff, zipMaxEntries: 0xffff };
+
         const state = {
             params: null,        // per-part signed tokens
             parts: null,         // [{ index, spinePosition, path, token, name, url }]
             dirHandle: null,     // FileSystemDirectoryHandle of the book folder
+            zipName: null,       // name of the single archive, when there is no folder
             files: [],           // [{ name, size, handle }]
             running: false,
             cancelled: false,
@@ -299,7 +305,7 @@
 
         async function pickFolder() {
             if (!window.showDirectoryPicker) {
-                log("no File System Access API: falling back to per-file downloads");
+                log("no File System Access API here: falling back to one ZIP download");
                 state.dirHandle = null;
                 return;
             }
@@ -311,10 +317,10 @@
                 // The player runs in a cross-origin subframe of the app, and a
                 // cross-origin subframe is not allowed to show a file picker at
                 // all. Nothing inside the frame can change that, so fall back to
-                // one download per file instead of failing the whole run.
+                // a single ZIP download instead of failing the whole run.
                 state.dirHandle = null;
                 warn("folder picker unavailable (" + (e && e.message ? e.message : e) +
-                    ") — falling back to one download per file");
+                    ") — falling back to one ZIP download");
                 return;
             }
             const book = await parent.getDirectoryHandle(
@@ -344,6 +350,112 @@
             await writable.close();
         }
 
+        // ------------------------------------------------------------------ zip
+
+        // A store-only ZIP writer. The parts are already-compressed MP3s, so
+        // deflate would burn CPU to save nothing, and a ZIP needs no library:
+        // local file headers, a central directory, an end-of-central-directory
+        // record. Names are UTF-8 (flag bit 11), because "José Author" has to
+        // survive the round trip.
+
+        const utf8 = new TextEncoder();
+        const ZIP_CHUNK_BYTES = 4 * 1024 * 1024;
+
+        const CRC_TABLE = (() => {
+            const table = new Uint32Array(256);
+            for (let n = 0; n < 256; n++) {
+                let c = n;
+                for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+                table[n] = c >>> 0;
+            }
+            return table;
+        })();
+
+        // Chunked, so a 500 MB part is never held as one ArrayBuffer.
+        async function crc32Of(blob) {
+            let crc = 0xffffffff;
+            for (let at = 0; at < blob.size; at += ZIP_CHUNK_BYTES) {
+                const bytes = new Uint8Array(await blob.slice(at, at + ZIP_CHUNK_BYTES).arrayBuffer());
+                for (let i = 0; i < bytes.length; i++) {
+                    crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+                }
+            }
+            return (crc ^ 0xffffffff) >>> 0;
+        }
+
+        function dosStamp(date) {
+            return {
+                time: (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1),
+                date: (((date.getFullYear() - 1980) & 0x7f) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+            };
+        }
+
+        // entries: [{ name, blob }]. The caller must have refused anything over
+        // `limits.zipMaxTotal`; without ZIP64 there is no way to describe it.
+        async function buildZip(entries, options) {
+            const prefix = (options && options.prefix) || "";
+            const stamp = dosStamp(new Date());
+            const files = [];
+            for (const entry of entries) {
+                files.push({
+                    name: utf8.encode(prefix + entry.name),
+                    blob: entry.blob,
+                    size: entry.blob.size,
+                    crc: await crc32Of(entry.blob),
+                });
+            }
+
+            const parts = [];
+            const central = [];
+            let offset = 0;
+            for (const file of files) {
+                const header = new Uint8Array(30 + file.name.length);
+                const head = new DataView(header.buffer);
+                head.setUint32(0, 0x04034b50, true);   // local file header
+                head.setUint16(4, 20, true);           // version needed
+                head.setUint16(6, 0x0800, true);       // UTF-8 names
+                head.setUint16(8, 0, true);            // method: store
+                head.setUint16(10, stamp.time, true);
+                head.setUint16(12, stamp.date, true);
+                head.setUint32(14, file.crc, true);
+                head.setUint32(18, file.size, true);
+                head.setUint32(22, file.size, true);
+                head.setUint16(26, file.name.length, true);
+                head.setUint16(28, 0, true);           // no extra field
+                header.set(file.name, 30);
+                parts.push(header, file.blob);
+
+                const record = new Uint8Array(46 + file.name.length);
+                const dir = new DataView(record.buffer);
+                dir.setUint32(0, 0x02014b50, true);    // central directory header
+                dir.setUint16(4, 20, true);            // version made by
+                dir.setUint16(6, 20, true);            // version needed
+                dir.setUint16(8, 0x0800, true);        // UTF-8 names
+                dir.setUint16(10, 0, true);            // method: store
+                dir.setUint16(12, stamp.time, true);
+                dir.setUint16(14, stamp.date, true);
+                dir.setUint32(16, file.crc, true);
+                dir.setUint32(20, file.size, true);
+                dir.setUint32(24, file.size, true);
+                dir.setUint16(28, file.name.length, true);
+                dir.setUint32(42, offset, true);       // local header offset
+                record.set(file.name, 46);
+                central.push(record);
+
+                offset += header.length + file.size;
+            }
+
+            const centralSize = central.reduce((n, record) => n + record.length, 0);
+            const end = new Uint8Array(22);
+            const eocd = new DataView(end.buffer);
+            eocd.setUint32(0, 0x06054b50, true);       // end of central directory
+            eocd.setUint16(8, files.length, true);     // entries on this disk
+            eocd.setUint16(10, files.length, true);    // total entries
+            eocd.setUint32(12, centralSize, true);
+            eocd.setUint32(16, offset, true);          // central directory offset
+            return new Blob([...parts, ...central, end], { type: "application/zip" });
+        }
+
         function statusError(status) {
             const error = new Error(`server returned ${status}`);
             error.status = status;
@@ -358,27 +470,9 @@
         }
 
         async function exportMetadata() {
+            if (!state.dirHandle) return; // no folder: downloadAsZip() owns the metadata
             const metadata = getMetadata();
             if (!metadata) return;
-
-            // Fallback mode: no directory to write into, so the metadata is a
-            // download like everything else. Skipping it would leave the parts
-            // with no chapters/tags for bakeMetadata.py.
-            if (!state.dirHandle) {
-                saveViaDownload("metadata.json", new Blob(
-                    [JSON.stringify(metadata, null, 2)], { type: "application/json" }));
-                if (metadata.coverUrl) {
-                    try {
-                        const response = await fetch(metadata.coverUrl);
-                        if (!response.ok) throw statusError(response.status);
-                        saveViaDownload("cover." + coverExtension(metadata.coverUrl), await response.blob());
-                    } catch (e) {
-                        warn("cover download failed:", e.message || e);
-                    }
-                }
-                log("downloaded metadata.json");
-                return;
-            }
 
             const dir = await state.dirHandle.getDirectoryHandle("metadata", { create: true });
             await writeFile(dir, "metadata.json", JSON.stringify(metadata, null, 2));
@@ -406,32 +500,26 @@
             log("wrote metadata/metadata.json");
         }
 
-        async function savePartOnce(part) {
-            if (state.dirHandle) {
-                // Check for an existing file *before* fetching, so resuming a
-                // partial download does not re-download finished parts.
-                const existing = await state.dirHandle.getFileHandle(part.name).catch(() => null);
-                if (existing) {
-                    const file = await existing.getFile();
-                    if (file.size > 0) {
-                        state.files.push({ name: part.name, size: file.size, handle: existing });
-                        return false;
-                    }
-                }
-            }
-
+        async function fetchPart(part) {
             const response = await fetch(part.url);
             if (!response.ok) throw statusError(response.status);
             assertAudio(response);
+            return response;
+        }
 
-            if (!state.dirHandle) {
-                // Fallback: one download prompt per part.
-                const blob = await response.blob();
-                saveViaDownload(part.name, blob);
-                state.files.push({ name: part.name, size: blob.size, handle: null });
-                return true;
+        async function savePartOnce(part) {
+            // Check for an existing file *before* fetching, so resuming a
+            // partial download does not re-download finished parts.
+            const existing = await state.dirHandle.getFileHandle(part.name).catch(() => null);
+            if (existing) {
+                const file = await existing.getFile();
+                if (file.size > 0) {
+                    state.files.push({ name: part.name, size: file.size, handle: existing });
+                    return false;
+                }
             }
 
+            const response = await fetchPart(part);
             if (!response.body) throw new Error("empty response body");
             const handle = await state.dirHandle.getFileHandle(part.name, { create: true });
             const writable = await handle.createWritable();
@@ -448,17 +536,21 @@
             return true;
         }
 
-        async function savePart(part, attempt = 0) {
+        // One retry for a transient failure, never for a status that means "stop
+        // asking" (403/429): hammering those only digs the hole deeper.
+        async function retrying(label, fn, attempt = 0) {
             try {
-                return await savePartOnce(part);
+                return await fn();
             } catch (e) {
                 const fatal = e && HALT_STATUSES.includes(e.status);
                 if (fatal || attempt >= 1) throw e;
-                warn(`retrying ${part.name} in ${RETRY_DELAY_MS / 1000}s:`, e.message || e);
+                warn(`retrying ${label} in ${RETRY_DELAY_MS / 1000}s:`, e.message || e);
                 await sleep(RETRY_DELAY_MS);
-                return savePart(part, attempt + 1);
+                return retrying(label, fn, attempt + 1);
             }
         }
+
+        const savePart = part => retrying(part.name, () => savePartOnce(part));
 
         // ------------------------------------------------------------ download
 
@@ -486,12 +578,95 @@
             }
         }
 
+        // Fallback mode. A cross-origin subframe cannot open a folder picker, so
+        // the parts, the metadata and the cover go into one store-only ZIP: a
+        // single download that unpacks into exactly the folder layout the folder
+        // path would have written.
+        async function downloadAsZip(parts) {
+            const book = sanitize(getAuthorString() + " - " + getTitle());
+            const zipName = book + ".zip";
+            const entries = [];
+            let total = 0;
+            let zipping = true;
+
+            // Whether the archive still fits is only known as the parts arrive
+            // (the sizes are not known up front), so crossing the limit hands the
+            // buffered entries to the plain download path and continues there.
+            const add = (name, blob) => {
+                if (!zipping) {
+                    saveViaDownload(name.split("/").pop(), blob);
+                    return;
+                }
+                entries.push({ name, blob });
+                total += blob.size;
+                if (total >= limits.zipMaxTotal || entries.length >= limits.zipMaxEntries) {
+                    zipping = false;
+                    warn(`too big for one ZIP (${Math.round(total / 1048576)} MB): ` +
+                        "downloading the files individually instead");
+                    for (const entry of entries) saveViaDownload(entry.name.split("/").pop(), entry.blob);
+                    entries.length = 0;
+                }
+            };
+
+            for (let i = 0; i < parts.length; i++) {
+                if (state.cancelled) {
+                    state.lastError = "cancelled";
+                    return;
+                }
+                const part = parts[i];
+                setProgress(i + 1, parts.length, part.name);
+                let blob;
+                try {
+                    blob = await retrying(part.name, async () => (await fetchPart(part)).blob());
+                } catch (e) {
+                    if (e && HALT_STATUSES.includes(e.status)) {
+                        state.lastError = `stopped: server returned ${e.status} — reload the page and click again`;
+                        warn(state.lastError);
+                        return;
+                    }
+                    // A missing part would make a silently incomplete archive.
+                    if (zipping) throw new Error(`${part.name}: ${e.message || e}`);
+                    warn("failed", part.name, e);
+                    continue;
+                }
+                add(part.name, blob);
+                state.files.push({ name: part.name, size: blob.size, handle: null });
+                log("fetched", part.name);
+                await sleep(PART_DELAY_MS);
+            }
+
+            const metadata = getMetadata();
+            if (metadata) {
+                add("metadata/metadata.json", new Blob(
+                    [JSON.stringify(metadata, null, 2)], { type: "application/json" }));
+                if (metadata.coverUrl) {
+                    try {
+                        const response = await fetch(metadata.coverUrl);
+                        if (!response.ok) throw statusError(response.status);
+                        add("metadata/cover." + coverExtension(metadata.coverUrl), await response.blob());
+                    } catch (e) {
+                        warn("cover download failed:", e.message || e);
+                    }
+                }
+            }
+            if (!zipping) return;
+
+            if (ui) {
+                ui.button.textContent = "zip";
+                ui.status.textContent = "building zip…";
+            }
+            saveViaDownload(zipName, await buildZip(entries, { prefix: book + "/" }));
+            state.zipName = zipName;
+            log(`downloaded ${zipName}: ${state.files.length} part(s) + metadata/`);
+        }
+
         async function downloadAll() {
             if (state.running) return state.files;
 
             state.running = true;
             state.cancelled = false;
             state.lastError = null;
+            state.zipName = null;
             state.files = [];
             updateUi();
 
@@ -511,8 +686,12 @@
                     throw e;
                 }
 
-                await exportMetadata();
-                await downloadParts(parts);
+                if (state.dirHandle) {
+                    await exportMetadata();
+                    await downloadParts(parts);
+                } else {
+                    await downloadAsZip(parts);
+                }
             } catch (e) {
                 state.lastError = e && e.message ? e.message : String(e);
                 warn("run failed:", e);
@@ -590,9 +769,9 @@
             if (state.running) ui.status.textContent = "starting…";
             else if (state.lastError) ui.status.textContent = state.lastError;
             else if (state.files.length) {
-                ui.status.textContent = state.dirHandle
-                    ? `${state.files.length} file(s) saved`
-                    : `${state.files.length} file(s) downloaded`;
+                if (state.dirHandle) ui.status.textContent = `${state.files.length} file(s) saved`;
+                else if (state.zipName) ui.status.textContent = `${state.files.length} parts in 1 zip`;
+                else ui.status.textContent = `${state.files.length} file(s) downloaded`;
             }
             else if (summary) ui.status.textContent = summary;
             else ui.status.textContent = "";
@@ -719,6 +898,8 @@
             validate: () => validate(readParts()),
             capture: captureParams,
             download: downloadAll,
+            zip: buildZip,
+            limits,
             cancel: () => { state.cancelled = true; },
         };
         setInterval(mountUi, MOUNT_INTERVAL_MS);
