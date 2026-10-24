@@ -1,40 +1,54 @@
 # LibbyRip
 
-Rip all your favorite audiobooks from libby! 
+Rip a borrowed Libby audiobook to MP3, then turn it into one chaptered `.m4b` — or keep the
+tagged MP3 parts. Audio only: no EPUB, no in-browser FFmpeg, no 50 MB download.
 
-<sup> Powered by [FFmpeg.js](https://github.com/PsychedelicPalimpsest/FFmpeg-js) </sup>
+This is a fork of [PsychedelicPalimpsest/LibbyRip](https://github.com/PsychedelicPalimpsest/LibbyRip)
+(MIT, © HeronErin). Everything upstream is still here and untouched — `userscript.js`,
+`bakeMetadata.py`, `buildChapters.py`, `convertToM4b.py`, the EPUB downloader. What this fork
+adds is `libby-audio.user.js` (grab the audio) and `audiobook.py` (make the audiobook out of
+it).
 
-![Exporting audiobook](imgs/export.png)
-![Showing chapters](imgs/chapters.png)
+## Contents
 
-<sup>Be careful, I have had multiple library cards banned in the past from using this tool (See [#14](https://github.com/PsychedelicPalimpsest/LibbyRip/issues/14), [#12](https://github.com/PsychedelicPalimpsest/LibbyRip/issues/12), and [#8](https://github.com/PsychedelicPalimpsest/LibbyRip/issues/8) for more details) </sup>
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [1. Grabbing the audio](#1-grabbing-the-audio)
+- [2. Making an audiobook](#2-making-an-audiobook)
+- [Troubleshooting](#troubleshooting)
+- [Upstream tools](#upstream-tools)
+- [Disclaimer](#disclaimer)
 
+## Requirements
 
-## How to use
+- A browser with [Tampermonkey](https://www.tampermonkey.net/) — Chrome, Edge or Firefox.
+- For step 2 only: **Python 3.8+** and **FFmpeg** on your `PATH`
+  ([download](https://www.ffmpeg.org/download.html)). The `.m4b` path needs nothing else. The
+  tagged-MP3 path also needs `eyeD3`, installed with
+  `python -m pip install -r requirements.txt`.
 
-1. Install the [TamperMonkey](https://www.tampermonkey.net/) extension for your browser.
-2. Install the userscript from the [GreasyFork page](https://greasyfork.org/en/scripts/498782-libregrab)
-3. Find your audiobook on Libby and export.
+## Quick start
 
-**NOTE:** If you do not see anything, it _could_ be because TamperMonkey is not set up properly on Chrome (and chromeium based) browsers! See the TamperMonkey [FAQ](https://www.tampermonkey.net/faq.php#Q209) page here for more info.
+1. Install `libby-audio.user.js` in Tampermonkey: open the file in this repo, or paste it into
+   Tampermonkey's *Create a new script*.
+2. Open a borrowed audiobook on Libby and click **Grab audio** in the bottom-right corner. You
+   get a folder, or a single `.zip`, laid out as `<Author> - <Title>/Part 001.mp3 …` plus
+   `metadata/`.
+3. Turn it into an audiobook:
 
-<a href='https://ko-fi.com/V7V81BFLAH' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
+   ```bash
+   python audiobook.py m4b "Author - Title.zip"   # one .m4b with chapters and cover
+   python audiobook.py mp3 "Author - Title.zip"   # tagged Part 001.mp3 …
+   ```
 
-
-## Audio-only variant (`libby-audio.user.js`)
-
-Based on [PsychedelicPalimpsest/LibbyRip](https://github.com/PsychedelicPalimpsest/LibbyRip)
-(MIT, © HeronErin): `userscript.js` and the rest of the project are upstream's, and
-`libby-audio.user.js` is the addition this variant is about.
+## 1. Grabbing the audio
 
 `libby-audio.user.js` is a much smaller alternative to the main userscript. It does one
 thing: download the MP3 parts of a borrowed audiobook, plus the `metadata/` folder that
-`bakeMetadata.py` and `buildChapters.py` already consume. No EPUB, no in-browser FFmpeg,
-no 50 MB download.
+`bakeMetadata.py` and `buildChapters.py` already consume.
 
-1. Install it in Tampermonkey the same way as the main script (both can be installed at once).
-2. Open a borrowed audiobook. A small **Grab audio** panel appears in the bottom-right corner.
-3. Click it. If the page can open a folder picker, pick a parent folder and files are written
+1. Open a borrowed audiobook. A small **Grab audio** panel appears in the bottom-right corner.
+2. Click it. If the page can open a folder picker, pick a parent folder and files are written
    to `<parent>/<Author> - <Title>/Part 001.mp3 …` plus `metadata/`. Otherwise (see below)
    you get a single `<Author> - <Title>.zip` instead.
 
@@ -77,10 +91,14 @@ Notes:
   are per-frame, so if the console says `__lg is not defined` you are in the wrong frame —
   switch the console's context dropdown from `top` to the player frame.
 
-## Converting to m4b or tagged mp3 (`audiobook.py`)
+## 2. Making an audiobook
 
-`audiobook.py` turns the `.zip` the userscript downloads into the format you want. It needs
-FFmpeg on your PATH; the m4b path needs nothing else, the mp3 path also needs `eyeD3`.
+`audiobook.py` turns the `.zip` (or the folder) the userscript produced into the format you
+want.
+
+**Which one?** If you will listen in Apple Books, Audiobookshelf, Prologue or Smart Audiobook
+Player, take the `.m4b` — it is the only one of the two those players show a chapter menu for.
+If you want the separate files, or your player builds chapters on its own, take `mp3`.
 
 ### Start to finish (Windows)
 
@@ -88,7 +106,7 @@ FFmpeg on your PATH; the m4b path needs nothing else, the mp3 path also needs `e
 2. Go to the folder you cloned this into:
 
    ```bash
-   cd <the folder you cloned this into>
+   cd C:\Users\you\LibbyRip
    ```
 
 3. Run it on the zip the userscript downloaded, using the full path to that zip:
@@ -129,12 +147,58 @@ python audiobook.py mp3 "Author - Title.zip"    # unpacked, tagged Part 001.mp3 
   instead of once per part.
 - The result is read back with `ffprobe` before it is reported as done, so a failed merge
   cannot look like a successful one.
-- `--out` chooses the destination (`--out "D:\books\Proof.m4b"`), and both formats accept an
-  already-unzipped folder instead of the zip.
+- `--out` chooses the destination (`--out "D:\books\Author - Title.m4b"`), and both formats
+  accept an already-unzipped folder instead of the zip.
 - `--bitrate 96` overrides the encoder's bitrate. By default it follows the source, and a
   Libby book is 64k, so re-encoding does not inflate the file.
 - The mp3 mode needs `eyeD3` first: `python -m pip install -r requirements.txt`. Running it
   twice is fine: it reuses the folder it made.
+
+## Troubleshooting
+
+- **No panel appears.** The script only runs on the player pages (`*.listen.libbyapp.com`,
+  `*.listen.overdrive.com`), not on Libby's search or shelf pages. Open the book and start it
+  playing. The Tampermonkey icon should show a `1`, and the console should print
+  `[lgrab] v8 userscript running on …` — if that line is missing, the script never ran.
+- **`python: can't open file 'audiobook.py'`** — you are not in the folder the script lives in.
+  Either `cd` there first, or give the full path:
+  `python "C:\path\to\audiobook.py" m4b "Author - Title.zip"`.
+- **`ffmpeg not found`** — install FFmpeg and put it on your `PATH`, then open a new terminal.
+- **The mp3 mode says `eyeD3` is missing** — `python -m pip install -r requirements.txt`.
+- **I got a `.zip` instead of a folder.** Expected on the Libby player: it runs in a
+  cross-origin iframe, which browsers do not allow to open a folder picker. Set Chrome to
+  *Ask where to save each file* (`chrome://settings/downloads`) if you want to choose where it
+  lands.
+- **The grab stopped with a `403` or `429`.** Signed part URLs expire. Reload the page and
+  click **Grab audio** again — parts already saved are skipped, so it resumes.
+- **The `.m4b` has no chapters.** Some books have no chapter list in Libby's manifest at all.
+  Nothing can invent one; the audio still converts.
+- **Where does the output go?** Next to the zip (or wherever `--out` says). Nothing is written
+  into the repo folder.
+- **A book over 4 GiB.** ZIP64 is not implemented, so it is downloaded as separate files with a
+  message saying why.
+
+## Upstream tools
+
+This fork tracks [PsychedelicPalimpsest/LibbyRip](https://github.com/PsychedelicPalimpsest/LibbyRip)
+(MIT, © HeronErin) and is powered by
+[FFmpeg.js](https://github.com/PsychedelicPalimpsest/FFmpeg-js). The sections below are
+upstream's own documentation, kept as-is; see their repo for the current version.
+
+![Exporting audiobook](imgs/export.png)
+![Showing chapters](imgs/chapters.png)
+
+<sup>Be careful, I have had multiple library cards banned in the past from using this tool (See [#14](https://github.com/PsychedelicPalimpsest/LibbyRip/issues/14), [#12](https://github.com/PsychedelicPalimpsest/LibbyRip/issues/12), and [#8](https://github.com/PsychedelicPalimpsest/LibbyRip/issues/8) for more details) </sup>
+
+### How to use the main userscript
+
+1. Install the [TamperMonkey](https://www.tampermonkey.net/) extension for your browser.
+2. Install the userscript from the [GreasyFork page](https://greasyfork.org/en/scripts/498782-libregrab)
+3. Find your audiobook on Libby and export.
+
+**NOTE:** If you do not see anything, it _could_ be because TamperMonkey is not set up properly on Chrome (and chromeium based) browsers! See the TamperMonkey [FAQ](https://www.tampermonkey.net/faq.php#Q209) page here for more info.
+
+<a href='https://ko-fi.com/V7V81BFLAH' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
 
 ## Using the Python Script (`bakeMetadata.py`)
 
@@ -210,6 +274,6 @@ The EPUB downloader is **unstable**, and **unreliable**. It works with a majorit
 
 <hr>
 
+## Disclaimer
 
-
-**Disclaimer:** This tool is intended for educational and personal research purposes only. The developers do not condone or encourage any illegal activity, including the unauthorized distribution or reproduction of copyrighted content. By using this tool, you accept full responsibility for your actions and agree to comply with all applicable laws. Use at your own risk.
+This tool is intended for educational and personal research purposes only. The developers do not condone or encourage any illegal activity, including the unauthorized distribution or reproduction of copyrighted content. By using this tool, you accept full responsibility for your actions and agree to comply with all applicable laws. Use at your own risk.

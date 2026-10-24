@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Turn a grabbed Libby audiobook into the format you want.
 
-    python audiobook.py m4b "Adam Kucharski - Proof.zip"   -> one .m4b with chapters
-    python audiobook.py mp3 "Adam Kucharski - Proof.zip"   -> tagged .mp3 parts
+    python audiobook.py m4b "Author - Title.zip"   -> one .m4b with chapters
+    python audiobook.py mp3 "Author - Title.zip"   -> tagged .mp3 parts
 
 Both take the .zip the userscript downloads, or an already-unzipped folder.
 Nothing is uploaded anywhere; this is ffmpeg on your own machine.
