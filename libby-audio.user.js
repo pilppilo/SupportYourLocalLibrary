@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Libby Audio Only
 // @namespace    http://tampermonkey.net/
-// @version      2
+// @version      3
 // @description  Download the MP3 parts of a borrowed Libby audiobook (plus metadata/ for bakeMetadata.py). No EPUB, no ZIP, no FFmpeg.
 // @author       LibbyRip
 // @license      MIT
@@ -20,7 +20,8 @@
     // Log before anything else: if this line never appears, the script did not
     // run at all (usually a @match problem), which is otherwise indistinguishable
     // from "ran but the injection was blocked".
-    console.log("[lgrab] userscript running on " + location.href);
+    console.log("[lgrab] userscript running on " + location.href +
+        (window.top === window ? " (top frame)" : " (iframe)"));
 
     let injected = false;
     // DOM events cross the isolated/page world boundary, so the injected code
@@ -71,6 +72,16 @@
 
     function main() {
         "use strict";
+
+        // A second injection into the same frame (Tampermonkey can run a
+        // document-start script more than once) would otherwise overwrite
+        // window.__lg with a fresh, empty state and make captured tokens look
+        // like they were never captured.
+        if (window.__lg) {
+            console.warn("[lgrab] already running in this frame; keeping the existing instance");
+            document.dispatchEvent(new CustomEvent("libregrab:ready"));
+            return;
+        }
 
         const PART_DELAY_MS = 1500;      // politeness gap between parts
         const RETRY_DELAY_MS = 5000;
@@ -142,13 +153,20 @@
 
             const parts = list.map((component, i) => {
                 const meta = component.meta || {};
+                // Reference implementation (userscript.js getUrls): the signed
+                // token is indexed by `spinePosition`, while the part *number*
+                // comes from `meta["-odread-spine-position"]`. They are normally
+                // equal, but they are not the same field and must not be
+                // conflated: using one for both silently downloads the wrong part.
+                const tokenIndex = typeof component.spinePosition === "number" ? component.spinePosition : i;
                 const index = typeof meta["-odread-spine-position"] === "number"
                     ? meta["-odread-spine-position"]
-                    : i;
+                    : tokenIndex;
                 const path = String(meta.path || "").replace(/^\/+/, "");
-                const token = params[index];
+                const token = params[tokenIndex];
                 return {
                     index,
+                    tokenIndex,
                     spinePosition: component.spinePosition,
                     path,
                     token,
@@ -174,11 +192,17 @@
             const seen = new Set();
             for (const part of parts) {
                 if (!part.path) problems.push(`part ${part.index}: empty path`);
-                if (!part.token) problems.push(`part ${part.index}: no signed token`);
+                if (!part.token) problems.push(`part ${part.index}: no signed token (spinePosition ${part.tokenIndex})`);
                 if (part.index < 0 || part.index >= count) problems.push(`part ${part.index}: index out of range`);
+                if (part.tokenIndex < 0 || part.tokenIndex >= count) {
+                    problems.push(`part ${part.index}: spinePosition ${part.tokenIndex} out of range`);
+                }
                 if (seen.has(part.index)) problems.push(`part ${part.index}: duplicate index`);
-                if (typeof part.spinePosition === "number" && part.spinePosition !== part.index) {
-                    warn(`part ${part.index}: spinePosition ${part.spinePosition} differs from spine position ${part.index}`);
+                if (part.spinePosition !== undefined && part.spinePosition !== part.tokenIndex) {
+                    warn(`part ${part.index}: spinePosition ${part.spinePosition} differs from the field used for the token (${part.tokenIndex})`);
+                }
+                if (part.index !== part.tokenIndex) {
+                    warn(`part ${part.index}: the part number differs from the field used for the token (${part.tokenIndex}) — using the token index for the URL and the part number for the file name`);
                 }
                 seen.add(part.index);
             }
@@ -186,6 +210,7 @@
             if (problems.length) {
                 console.table(parts.map(p => ({
                     index: p.index,
+                    tokenIndex: p.tokenIndex,
                     spinePosition: p.spinePosition,
                     path: p.path,
                     hasToken: !!p.token,
@@ -507,6 +532,36 @@
 
         // ---------------------------------------------------------- diagnostics
 
+        // The player runs in a frame, and DevTools evaluates in the top frame by
+        // default, so `__lg.diagnose()` there reports an empty state and looks
+        // broken. This walks every same-origin frame and says where the book is.
+        function where() {
+            const rows = [];
+            const visit = (win, depth) => {
+                const row = { depth, url: null, bif: null, tokens: null, progressBar: null, button: null };
+                try { row.url = win.location.href; } catch (e) { row.url = "(cross-origin)"; }
+                try {
+                    row.bif = !!win.BIF;
+                    row.progressBar = !!win.document.querySelector(".nav-progress-bar");
+                    row.button = !!win.document.getElementById("lgrabBtn");
+                    row.tokens = win.__lg && win.__lg.state && win.__lg.state.params
+                        ? win.__lg.state.params.length
+                        : null;
+                } catch (e) { /* cross-origin frame */ }
+                rows.push(row);
+                try {
+                    for (let i = 0; i < win.frames.length; i++) visit(win.frames[i], depth + 1);
+                } catch (e) { /* cross-origin frame */ }
+            };
+            visit(window.top, 0);
+            console.table(rows);
+            const book = rows.find(r => r.bif);
+            if (!book) log("no frame has window.BIF — open an audiobook, then run this again");
+            else if (book.url === location.href) log("this frame has the book; __lg.diagnose() works here");
+            else log("the book is in the frame: " + book.url + " — pick it in the DevTools console context dropdown, then run __lg.diagnose()");
+            return rows;
+        }
+
         function diagnose() {
             captureParamsFromBif();
             let parts = [];
@@ -517,6 +572,10 @@
             }
             const toc = window.BIF && window.BIF.map && window.BIF.map.nav && window.BIF.map.nav.toc;
             const report = {
+                frame: window.top === window ? "top" : "iframe",
+                url: location.href,
+                hasBif: !!window.BIF,
+                hasProgressBar: !!document.querySelector(".nav-progress-bar"),
                 tokensCaptured: state.params ? state.params.length : 0,
                 components: (components() || []).length,
                 parts: parts.length,
@@ -530,6 +589,7 @@
             };
             console.table(parts.map(p => ({
                 index: p.index,
+                tokenIndex: p.tokenIndex,
                 spinePosition: p.spinePosition,
                 name: p.name,
                 hasToken: !!p.token,
@@ -544,6 +604,7 @@
         window.__lg = {
             state,
             diagnose,
+            where,
             parts: readParts,
             validate: () => validate(readParts()),
             capture: captureParams,
