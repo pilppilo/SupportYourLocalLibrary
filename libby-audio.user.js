@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Libby Audio Only
+// @name         Libby Audio
 // @namespace    http://tampermonkey.net/
-// @version      8
-// @description  Download the MP3 parts of a borrowed Libby audiobook (plus metadata/ for bakeMetadata.py). No EPUB, no FFmpeg.
+// @version      9
+// @description  Download a borrowed Libby audiobook's MP3 parts (plus metadata/ for bakeMetadata.py). No FFmpeg, no sign-in.
 // @author       LibbyRip
 // @license      MIT
 // @match        *://*.listen.libbyapp.com/*
@@ -10,6 +10,14 @@
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
+
+// The eData descramble, the staged probe and `extractSpine` are ported from
+// JavaGT/libby-archiver (MIT © JavaGT) — https://github.com/JavaGT/libby-archiver
+// — see LICENSE-JavaGT.txt. Everything else is LibbyRip's own.
+//
+// This script is audio only. Ebooks and magazines are a separate concern:
+// real ebooks come from `ebook.py` (the .acsm route), and the reader-page
+// reconstruction lives in `libby-read.user.js`.
 
 // Chrome/MV3 runs userscripts in an isolated JS world, so `window.BIF` and the
 // JSON.parse hook must be installed in the page's own context. Everything below
@@ -19,7 +27,7 @@
     // Log before anything else: if this line never appears, the script did not
     // run at all (usually a @match problem), which is otherwise indistinguishable
     // from "ran but the injection was blocked".
-    console.log("[lgrab] v8 userscript running on " + location.href +
+    console.log("[lgrab] v9 audio userscript running on " + location.href +
         (window.top === window ? " (top frame)" : " (iframe)"));
 
     let injected = false;
@@ -89,9 +97,9 @@
             return;
         }
 
-        const PART_DELAY_MS = 1500;      // politeness gap between parts
-        const RETRY_DELAY_MS = 5000;
-        const REVOKE_DELAY_MS = 60000;   // immediate revoke breaks Firefox downloads
+        // A part is large and few. Kept in one object so __lg.pacing can retune a
+        // run live.
+        const pacing = { part: 1500, retry: 5000, revoke: 60000 };
         const MOUNT_INTERVAL_MS = 500;
         const HALT_STATUSES = [403, 429];
 
@@ -109,11 +117,204 @@
             running: false,
             cancelled: false,
             lastError: null,
+            source: null,        // which discovery path supplied the parts ("bif" | "edata")
+            edata: null,         // last probeEData result (stages + openbook)
         };
 
         const log = (...a) => console.log("[lgrab]", ...a);
         const warn = (...a) => console.warn("[lgrab]", ...a);
         const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        // ---------------------------------------------------------- pure ciphers
+        // Self-contained and side-effect free: the eData descramble, the staged
+        // probe and `extractSpine`. Ported from JavaGT/libby-archiver (MIT ©
+        // JavaGT). The markers below are load-bearing: test/ciphers.test.mjs
+        // extracts this exact block and runs it under node:test, so keep
+        // everything between them free of page globals (no `location`, `log`,
+        // `state`).
+        // ---- pure-cipher-block:start ----
+        // `Buffer.from(x, "base64")` is lenient: whitespace and stray characters
+        // are ignored, the data ends at the first `=`, and a trailing group of one
+        // character is dropped. `atob` is strict, so mirror that behaviour first,
+        // then decode as UTF-8 (OverDrive's base64-utf8-safe).
+        function b64ToUtf8(text) {
+            let clean = String(text);
+            const pad = clean.indexOf("=");
+            if (pad !== -1) clean = clean.slice(0, pad);
+            clean = clean.replace(/[^A-Za-z0-9+/]/g, "");
+            if (clean.length % 4 === 1) clean = clean.slice(0, -1);
+            while (clean.length % 4) clean += "=";
+            const binary = atob(clean);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+        }
+
+        // Undo bifocal's per-position scramble: the key is the reversed buid, a
+        // nonzero digit at position a shifts by (a + digit) % 94 with a
+        // % 126 + 32 wrap. Non-digits (and zero) are a no-op.
+        function descramble(key, data) {
+            const klen = key.length || 1;
+            const shifts = new Array(klen);
+            for (let i = 0; i < klen; i++) shifts[i] = parseInt(key[i], 10) || 0;
+            const n = data.length;
+            const units = new Uint16Array(n);
+            for (let a = 0; a < n; a++) {
+                let ch = data.charCodeAt(a);
+                const d = shifts[a % klen];
+                if (d) {
+                    ch += (a + d) % 94;
+                    if (ch > 126) ch = (ch % 126) + 32;
+                }
+                units[a] = ch;
+            }
+            let out = "";
+            for (let at = 0; at < n; at += 8192) {
+                out += String.fromCharCode.apply(null, units.subarray(at, Math.min(at + 8192, n)));
+            }
+            return out;
+        }
+
+        const SIMPLE_ESCAPES = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v", "0": "\0" };
+
+        // Parse the eData array literal WITHOUT evaluating it — this text comes off
+        // the wire. Strict JSON first, then a character parser that accepts only an
+        // array of quoted strings with JS escapes. Anything else is rejected.
+        function parseArrayLiteral(literal) {
+            try {
+                const parsed = JSON.parse(literal);
+                if (Array.isArray(parsed) && parsed.every(s => typeof s === "string")) return parsed;
+            } catch (e) { /* fall through to the strict string-array parser */ }
+
+            const out = [];
+            let cur = "";
+            let inString = false;
+            let quote = "";
+            let seenOpen = false;
+            let i = 0;
+            const text = String(literal);
+            const len = text.length;
+            while (i < len) {
+                if (!inString) {
+                    const c = text[i];
+                    if (c === '"' || c === "'") { inString = true; quote = c; i++; }
+                    else if (c === "[" && !seenOpen && out.length === 0) { seenOpen = true; i++; }
+                    else if (c === "]" || c === "," || /\s/.test(c)) { i++; }
+                    else throw new Error("eData literal contains a non-string token near " + JSON.stringify(c));
+                    continue;
+                }
+                if (text[i] === quote) { inString = false; out.push(cur); cur = ""; i++; continue; }
+                if (text[i] === "\\") {
+                    const e = text[++i];
+                    if (e === "x") { cur += String.fromCharCode(parseInt(text.slice(i + 1, i + 3), 16)); i += 2; }
+                    else if (e === "u") { cur += String.fromCharCode(parseInt(text.slice(i + 1, i + 5), 16)); i += 4; }
+                    else if (e === undefined) throw new Error("eData literal ends mid-escape");
+                    else if (e in SIMPLE_ESCAPES) cur += SIMPLE_ESCAPES[e];
+                    else cur += e;
+                    i++;
+                    continue;
+                }
+                cur += text[i++];
+            }
+            if (inString) throw new Error("unterminated string in eData literal");
+            if (!seenOpen) throw new Error("eData literal is not an array");
+            return out;
+        }
+
+        // Decode `window.eData` in named stages, so a wire-format drift is reported
+        // as the exact broken contract. Stages: eData-marker (the page still embeds
+        // eData), eData-literal (the string array parses), eData-json (descramble +
+        // base64 + JSON.parse yield an object), openbook-shape (it carries `.b`).
+        function probeEData(playerHtml, buid) {
+            const stages = [];
+            const match = String(playerHtml).match(
+                /window\.eData\s*=\s*(\[[\s\S]*?\])\s*;\s*SPARK\.bifocalPath/);
+            stages.push({
+                stage: "eData-marker",
+                ok: !!match,
+                detail: match ? undefined : "window.eData = [...];SPARK.bifocalPath block not found in the page",
+            });
+            if (!match) return { ok: false, stages };
+
+            let parts;
+            try {
+                parts = parseArrayLiteral(match[1]);
+                stages.push({ stage: "eData-literal", ok: true });
+            } catch (e) {
+                stages.push({ stage: "eData-literal", ok: false, detail: e.message, drift: "the eData array literal shape changed" });
+                return { ok: false, stages };
+            }
+
+            let json;
+            try {
+                const key = String(buid).split("").reverse().join("");
+                json = b64ToUtf8(descramble(key, parts.join('"')));
+            } catch (e) {
+                stages.push({ stage: "eData-json", ok: false, detail: "decode failed: " + (e && e.message || e), drift: "scramble changed (shift %94 / wrap %126+32 / reversed-buid key)" });
+                return { ok: false, stages };
+            }
+            // A scramble drift never throws — it produces garbage text. Canary on JSON-ness.
+            if (!/^[\s{\[]/.test(json)) {
+                stages.push({
+                    stage: "eData-json",
+                    ok: false,
+                    detail: "decoded payload starts with " + JSON.stringify(json[0] || "") + ", not JSON",
+                    drift: "scramble changed (shift %94 / wrap %126+32 / reversed-buid key)",
+                });
+                return { ok: false, stages };
+            }
+            let doc;
+            try {
+                doc = JSON.parse(json);
+                stages.push({ stage: "eData-json", ok: true });
+            } catch (e) {
+                stages.push({ stage: "eData-json", ok: false, detail: e.message, drift: "scramble changed (shift %94 / wrap %126+32 / reversed-buid key)" });
+                return { ok: false, stages };
+            }
+
+            stages.push({ stage: "openbook-shape", ok: !!doc.b, detail: doc.b ? undefined : "the decoded openbook has no `.b`" });
+            if (!doc.b) return { ok: false, stages };
+
+            // Payload keys beside `.b` (spool/reader objects) are kept, not read.
+            const extra = { ...doc };
+            delete extra.b;
+            return {
+                ok: true,
+                stages,
+                openbook: doc.b,
+                ...(Object.keys(extra).length ? { extra } : {}),
+            };
+        }
+
+        // Openbook -> ordered page descriptors. The signed token is indexed by
+        // `-odread-spine-position` (the reference convention), and the name comes
+        // from `-odread-original-path`.
+        function extractSpine(openbook, base) {
+            const book = openbook || {};
+            const spine = Array.isArray(book.spine) ? book.spine : [];
+            const cmpts = book["-odread-cmpt-params"] || [];
+            const root = String(base).replace(/\/+$/, "");
+            return spine.map((part, i) => {
+                const position = typeof part["-odread-spine-position"] === "number" ? part["-odread-spine-position"] : i;
+                const token = cmpts[position] || "";
+                const urlPath = String(part.path || "").replace(/^\/+/, "");
+                return {
+                    position: i,
+                    tokenIndex: position,
+                    path: String(part["-odread-original-path"] || part.path || "").replace(/^\/+/, ""),
+                    urlPath,
+                    token,
+                    url: root + "/" + urlPath + (token ? "?" + token : ""),
+                    bytes: part["-odread-file-bytes"],
+                    mediaType: part["-media-type"] !== undefined ? part["-media-type"] : part["media-type"],
+                    duration: part["audio-duration"],
+                    renditionLayout: part["rendition-layout"],
+                    renditionViewport: part["rendition-viewport"],
+                    meta: part,
+                };
+            });
+        }
+        // ---- pure-cipher-block:end ----
 
         // ---------------------------------------------------------------- setup
 
@@ -158,7 +359,9 @@
             return Array.isArray(list) ? list : null;
         }
 
-        function readParts() {
+        // Primary discovery, unchanged from v8: the decoded BIF spool plus the signed
+        // tokens captured off the wire. This is the proven path on the real player.
+        function readPartsFromBif() {
             const list = components();
             if (!list) throw new Error("BIF not ready (open an audiobook page first)");
             const params = state.params || [];
@@ -191,9 +394,123 @@
             return parts;
         }
 
+        // ------------------------------------------------------- discovery (audio)
+
+        // The buid is the `dewey-<buid>` subdomain label; the eData key is it reversed.
+        function buid() {
+            return location.hostname.split(".")[0].replace(/^[^-]+-/, "");
+        }
+
+        // Read a failed response: `403 {"result":"whoa"}` is OverDrive's throttling
+        // signal and is worth naming; everything else is just the status.
+        async function responseError(response) {
+            let detail = "";
+            try { detail = await response.text(); } catch (e) { /* the body is gone */ }
+            let whoa = false;
+            try { whoa = JSON.parse(detail).result === "whoa"; } catch (e) { /* not JSON */ }
+            const error = new Error(whoa
+                ? `server returned ${response.status} (throttling: "whoa") — wait a while, then reload and click again`
+                : `server returned ${response.status}`);
+            error.status = response.status;
+            error.whoa = whoa;
+            return error;
+        }
+
+        // Same-origin re-fetch of the player page, which carries window.eData.
+        // Freshly minted signed tokens come with it, so this is also how a resumed
+        // run gets past tokens that expired while the tab sat open.
+        async function fetchPlayerHtml() {
+            const response = await fetch(location.origin + "/", { headers: { Accept: "text/html" } });
+            if (!response.ok) throw await responseError(response);
+            return response.text();
+        }
+
+        async function probeEDataFromPage() {
+            const result = probeEData(await fetchPlayerHtml(), buid());
+            state.edata = {
+                at: Date.now(),
+                ok: result.ok,
+                stages: result.stages,
+                openbook: result.openbook,
+                extra: result.extra,
+            };
+            return result;
+        }
+
+        // Audio-style part list built from a decoded openbook, shaped exactly like
+        // readPartsFromBif's output so the rest of the run cannot tell them apart.
+        function partsFromOpenbook(openbook) {
+            state.params = Array.from(openbook["-odread-cmpt-params"] || []);
+            const pages = extractSpine(openbook, location.origin);
+            const parts = pages.map((page, i) => {
+                const index = typeof page.meta["-odread-spine-position"] === "number"
+                    ? page.meta["-odread-spine-position"]
+                    : i;
+                return {
+                    index,
+                    tokenIndex: page.tokenIndex,
+                    spinePosition: page.tokenIndex,
+                    path: page.urlPath,
+                    originalPath: page.path,
+                    token: page.token,
+                    size: page.bytes,
+                    name: "Part " + String(index + 1).padStart(3, "0") + ".mp3",
+                    url: page.url,
+                };
+            }).sort((a, b) => a.index - b.index);
+            state.parts = parts;
+            return parts;
+        }
+
+        // Audio discovery with the eData fallback: the proven BIF path stays primary;
+        // if it cannot produce a usable list, decode eData ourselves and use that.
+        async function discoverParts() {
+            let primary = null;
+            let problem = null;
+            try {
+                captureParamsFromBif();
+                primary = readPartsFromBif();
+                problem = validate(primary)[0] || null;
+            } catch (e) {
+                problem = e && e.message ? e.message : String(e);
+            }
+            if (primary && !problem) {
+                state.source = "bif";
+                return { parts: primary, source: "bif" };
+            }
+
+            warn("the BIF path is not usable (" + problem + ") — trying the eData decode");
+            let probe = null;
+            try {
+                probe = await probeEDataFromPage();
+            } catch (e) {
+                throw new Error("no usable part list: " + problem + "; the eData re-fetch failed (" +
+                    (e && e.message ? e.message : e) + ")");
+            }
+            if (!probe.ok) {
+                const failed = probe.stages.find(s => !s.ok);
+                throw new Error("no usable part list: " + problem + "; the eData probe failed at " +
+                    (failed ? failed.stage : "an unknown stage") +
+                    (failed && failed.detail ? " (" + failed.detail + ")" : ""));
+            }
+            const parts = partsFromOpenbook(probe.openbook);
+            const problems = validate(parts, (probe.openbook.spine || []).length);
+            if (problems.length) throw new Error("the eData part list did not validate: " + problems[0]);
+            state.source = "edata";
+            log("using the eData decode:", parts.length, "part(s)");
+            return { parts, source: "edata" };
+        }
+
+        // Console-facing alias: the primary path only, never a network request.
+        function readParts() {
+            return readPartsFromBif();
+        }
+
         // Refuse to start on anything that would silently misnumber or miss parts.
-        function validate(parts) {
-            const count = (components() || []).length;
+        // `expected` overrides the spool count for the eData path, where there are no
+        // spool components to count.
+        function validate(parts, expected) {
+            const count = expected != null ? expected : ((components() || []).length || parts.length);
             const problems = [];
 
             if (!state.params) problems.push("signed part tokens were not captured yet (reload the page)");
@@ -254,21 +571,34 @@
             }
         }
 
+        function publisherOf(creators) {
+            const publisher = (creators || []).find(c => /pbl|publish/i.test(String(c.role || "")));
+            return publisher ? publisher.name : undefined;
+        }
+
         function getMetadata() {
             const map = window.BIF && window.BIF.map;
             if (!map) return null;
 
             const spine = map.spine || [];
             const spinePaths = spine.map(x => x["-odread-original-path"]);
+            // Everything here is additive: audiobook.py (part_paths, build_chapters)
+            // and bakeMetadata.py read the existing keys and ignore new ones.
             const metadata = {
                 title: map.title && map.title.main,
+                subtitle: map.title && map.title.subtitle,
                 description: map.description,
+                language: map.language,
+                identifier: map["-odread-buid"],
+                publisher: publisherOf(map.creator),
                 coverUrl: coverUrl(),
                 creator: map.creator,
                 spine: spine.map(x => ({
                     duration: x["audio-duration"],
                     type: x["media-type"],
                     bitrate: x["audio-bitrate"],
+                    bytes: x["-odread-file-bytes"],
+                    path: x["-odread-original-path"],
                 })),
             };
 
@@ -344,7 +674,7 @@
             (document.body || document.documentElement).appendChild(link);
             link.click();
             link.remove();
-            setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
+            setTimeout(() => URL.revokeObjectURL(url), pacing.revoke);
         }
 
         async function writeFile(dir, name, data) {
@@ -356,12 +686,12 @@
 
         // ------------------------------------------------------------------ zip
 
-        // A store-only ZIP writer. The parts are already-compressed MP3s, so
-        // deflate would burn CPU to save nothing, and a ZIP needs no library:
-        // local file headers, a central directory, an end-of-central-directory
-        // record. Names are UTF-8 (flag bit 11), because "José Author" has to
-        // survive the round trip.
+        // A dependency-free ZIP writer: local file headers, a central directory, an
+        // end-of-central-directory record. Parts are stored (they are already
+        // compressed MP3s, so deflate would burn CPU to save nothing). Names are
+        // UTF-8 (flag bit 11), because "José Author" has to survive the round trip.
 
+        // ---- pure-zip-block:start ----
         const utf8 = new TextEncoder();
         const ZIP_CHUNK_BYTES = 4 * 1024 * 1024;
 
@@ -394,8 +724,10 @@
             };
         }
 
-        // entries: [{ name, blob }]. The caller must have refused anything over
-        // `limits.zipMaxTotal`; without ZIP64 there is no way to describe it.
+        // entries: [{ name, blob }]. Store-only: every entry keeps method 0 and the
+        // same size in both fields, byte for byte as v8 wrote them. The caller must
+        // have refused anything over `limits.zipMaxTotal`; without ZIP64 there is no
+        // way to describe it.
         async function buildZip(entries, options) {
             const prefix = (options && options.prefix) || "";
             const stamp = dosStamp(new Date());
@@ -459,18 +791,23 @@
             eocd.setUint32(16, offset, true);          // central directory offset
             return new Blob([...parts, ...central, end], { type: "application/zip" });
         }
-
-        function statusError(status) {
-            const error = new Error(`server returned ${status}`);
-            error.status = status;
-            return error;
-        }
+        // ---- pure-zip-block:end ----
 
         function assertAudio(response) {
             const type = String(response.headers.get("content-type") || "").toLowerCase();
             if (type.includes("text/html") || type.includes("application/json")) {
                 throw new Error(`unexpected content-type "${type}"`);
             }
+        }
+
+        // The openbook carries the byte size of every part (`-odread-file-bytes`).
+        // A short download is a failed part (the retry path should see it); a long
+        // one only warns, in case the manifest number is stale.
+        function checkSize(part, size, label) {
+            const expected = Number(part && part.size);
+            if (!Number.isFinite(expected) || expected <= 0) return;
+            if (size < expected) throw new Error(`${label}: received ${size} bytes, expected ${expected}`);
+            if (size > expected) warn(`${label}: received ${size} bytes, the manifest says ${expected}`);
         }
 
         async function exportMetadata() {
@@ -495,7 +832,7 @@
                 }
                 try {
                     const response = await fetch(metadata.coverUrl);
-                    if (!response.ok) throw statusError(response.status);
+                    if (!response.ok) throw await responseError(response);
                     await writeFile(dir, name, await response.blob());
                 } catch (e) {
                     warn("cover download failed:", e.message || e);
@@ -506,7 +843,7 @@
 
         async function fetchPart(part) {
             const response = await fetch(part.url);
-            if (!response.ok) throw statusError(response.status);
+            if (!response.ok) throw await responseError(response);
             assertAudio(response);
             return response;
         }
@@ -536,6 +873,12 @@
                 throw e;
             }
             const size = (await handle.getFile()).size;
+            try {
+                checkSize(part, size, part.name);
+            } catch (e) {
+                await state.dirHandle.removeEntry(part.name).catch(() => {});
+                throw e;
+            }
             state.files.push({ name: part.name, size, handle });
             return true;
         }
@@ -548,8 +891,8 @@
             } catch (e) {
                 const fatal = e && HALT_STATUSES.includes(e.status);
                 if (fatal || attempt >= 1) throw e;
-                warn(`retrying ${label} in ${RETRY_DELAY_MS / 1000}s:`, e.message || e);
-                await sleep(RETRY_DELAY_MS);
+                warn(`retrying ${label} in ${pacing.retry / 1000}s:`, e.message || e);
+                await sleep(pacing.retry);
                 return retrying(label, fn, attempt + 1);
             }
         }
@@ -578,7 +921,7 @@
                     state.lastError = `${part.name}: ${e.message || e}`;
                     warn("failed", part.name, e);
                 }
-                await sleep(PART_DELAY_MS);
+                await sleep(pacing.part);
             }
         }
 
@@ -621,7 +964,12 @@
                 setProgress(i + 1, parts.length, part.name);
                 let blob;
                 try {
-                    blob = await retrying(part.name, async () => (await fetchPart(part)).blob());
+                    blob = await retrying(part.name, async () => {
+                        const fetched = await fetchPart(part);
+                        const body = await fetched.blob();
+                        checkSize(part, body.size, part.name);
+                        return body;
+                    });
                 } catch (e) {
                     if (e && HALT_STATUSES.includes(e.status)) {
                         state.lastError = `stopped: server returned ${e.status} — reload the page and click again`;
@@ -636,7 +984,7 @@
                 add(part.name, blob);
                 state.files.push({ name: part.name, size: blob.size, handle: null });
                 log("fetched", part.name);
-                await sleep(PART_DELAY_MS);
+                await sleep(pacing.part);
             }
 
             const metadata = getMetadata();
@@ -646,7 +994,7 @@
                 if (metadata.coverUrl) {
                     try {
                         const response = await fetch(metadata.coverUrl);
-                        if (!response.ok) throw statusError(response.status);
+                        if (!response.ok) throw await responseError(response);
                         add("metadata/cover." + coverExtension(metadata.coverUrl), await response.blob());
                     } catch (e) {
                         warn("cover download failed:", e.message || e);
@@ -675,10 +1023,9 @@
             updateUi();
 
             try {
-                captureParamsFromBif();
-                const parts = readParts();
-                const problems = validate(parts);
-                if (problems.length) throw new Error(problems[0]);
+                const discovery = await discoverParts();
+                const parts = discovery.parts;
+                log(`part discovery: ${discovery.source}`);
 
                 try {
                     await pickFolder();
@@ -801,7 +1148,7 @@
 
             let parts = [];
             try {
-                parts = readParts();
+                parts = readPartsFromBif();
             } catch (e) {
                 warn(e.message);
             }
@@ -855,16 +1202,17 @@
             return rows;
         }
 
-        function diagnose() {
+        async function diagnose() {
             captureParamsFromBif();
             let parts = [];
             try {
-                parts = readParts();
+                parts = readPartsFromBif();
             } catch (e) {
                 warn(e.message);
             }
             const toc = window.BIF && window.BIF.map && window.BIF.map.nav && window.BIF.map.nav.toc;
             const report = {
+                mode: "audio",
                 frame: window.top === window ? "top" : "iframe",
                 url: location.href,
                 hasBif: !!window.BIF,
@@ -879,6 +1227,8 @@
                 title: getTitle(),
                 author: getAuthorString(),
                 directoryPicker: !!window.showDirectoryPicker,
+                source: state.source || null,
+                eData: state.edata ? state.edata.stages : "not probed — run __lg.probeEData()",
             };
             console.table(parts.map(p => ({
                 index: p.index,
@@ -896,19 +1246,23 @@
         captureParams();
         window.__lg = {
             state,
+            mode: "audio",
+            pacing,
             diagnose,
             where,
             parts: readParts,
             validate: () => validate(readParts()),
             capture: captureParams,
             download: downloadAll,
+            probeEData: probeEDataFromPage,
+            cipher: { descramble, parseArrayLiteral, probeEData, extractSpine },
             zip: buildZip,
             limits,
             cancel: () => { state.cancelled = true; },
         };
         setInterval(mountUi, MOUNT_INTERVAL_MS);
         document.dispatchEvent(new CustomEvent("libregrab:ready"));
-        log("ready — run __lg.diagnose() before downloading");
+        log("ready (audio) — run __lg.diagnose() before downloading");
     }
 
     injectPageScript(main);

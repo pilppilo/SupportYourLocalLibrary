@@ -1,2 +1,9 @@
+# Audiobook tagging (mp3 mode of audiobook.py)
 eyeD3
 PyQt5
+
+# ebook.py — ACSM fulfilment (vendor/deacsm, GPLv3) and ADEPT decryption
+# (vendor/dedrm, GPLv3). See LICENSE-DeACSM.txt and LICENSE-DeDRM.txt.
+lxml
+pycryptodomex
+oscrypto

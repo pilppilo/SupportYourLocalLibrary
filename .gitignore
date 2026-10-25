@@ -1,2 +1,13 @@
 __pycache__/
 *.py[cod]
+
+# Local Adobe activation for ebook.py. It lives in ~/.libbyrip by default; ignored
+# in case --account-dir ever points inside the repo.
+.adept/
+.libbyrip/
+
+# Book files: never commit someone's loans or the tool's output.
+*.acsm
+!*.sample.acsm
+*.epub
+*.m4b

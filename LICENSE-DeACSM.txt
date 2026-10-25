@@ -1,0 +1,17 @@
+Third-party notice — ACSM fulfilment (vendor/deacsm/)
+
+The files in vendor/deacsm/ come from the "ACSM Input plugin for Calibre"
+(formerly DeACSM) by Leseratte10:
+
+    https://github.com/Leseratte10/acsm-calibre-plugin
+
+    ACSM Input Plugin for Calibre - Copyright (c) 2021-2025 Leseratte10
+
+That project is a full Python reimplementation of libgourou by Grégory Soutadé
+(LGPLv3 or later), and is itself released under the GNU General Public License,
+version 3 (GPLv3). The full licence text is kept verbatim at
+vendor/deacsm/LICENSE.
+
+The files kept here are unmodified. Only files this project does not need were
+left out (cpuid.py, libadobeImportAccount.py, the Calibre GUI, and the plugin
+packaging), so nothing inside the vendored modules was changed.

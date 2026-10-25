@@ -1,0 +1,17 @@
+Third-party notice — ADEPT decryption (vendor/dedrm/)
+
+The files in vendor/dedrm/ come from noDRM's DeDRM_tools:
+
+    https://github.com/noDRM/DeDRM_tools
+
+    ineptepub.py      Copyright (c) 2009-2022 by i♥cabbages, Apprentice Harper et al.
+    zeroedzipinfo.py  Copyright (c) the DeDRM_tools contributors
+
+Released under the GNU General Public License, version 3 (GPLv3). The full
+licence text is at vendor/deacsm/LICENSE (the same GPLv3 text, kept once).
+
+vendor/dedrm/ineptepub.py was changed in exactly one way: two Calibre-only
+relative imports (`from .utilities import SafeUnbuffered` and
+`from .argv_utils import unicode_argv`), used solely by its unused
+cli_main()/gui_main(), were removed so the module imports standalone. The spot
+is marked with a comment in the file.
